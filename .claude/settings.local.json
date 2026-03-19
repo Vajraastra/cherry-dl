@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:kemono.cr)",
+      "WebSearch",
+      "WebFetch(domain:www.npmjs.com)",
+      "Bash(curl -v -I \"https://kemono.cr/api/schema\")",
+      "Bash(curl -v \"https://kemono.cr/api/v1/patreon/user/10524127/posts-legacy\")",
+      "Bash(curl -v \"https://kemono.cr/api/v1/patreon/user/10524127/posts-legacy?o=0\")",
+      "Bash(curl -v -H \"Accept: text/css\" \"https://kemono.cr/api/v1/patreon/user/10524127/posts-legacy\")",
+      "Bash(curl -v -H \"Accept: text/css\" \"https://kemono.cr/api/v1/patreon/user/10524127/posts-legacy?o=0\")",
+      "Bash(curl -s \"https://kemono.cr/api/v1/patreon/user/10524127\")",
+      "Bash(chmod +x /run/media/system/Kilaya/githubs/cherry-dl/run.sh)",
+      "Bash(bash run.sh status)"
+    ]
+  }
+}

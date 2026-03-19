@@ -1,0 +1,28 @@
+# cherry-dl — configuración de usuario
+# Copia este archivo a ~/.cherry-dl/config.toml y edítalo
+
+[general]
+# Directorio raíz donde se guardan todas las colecciones
+download_dir = "/home/usuario/colecciones"
+
+# Número de descargas paralelas (global, puede sobreescribirse por template)
+workers = 3
+
+# Timeout por request en segundos
+timeout = 30
+
+[network]
+# Delay entre requests (segundos). Se elige un valor aleatorio entre min y max.
+delay_min = 10.0
+delay_max = 30.0
+
+# Reintentos máximos para llamadas a la API
+retries_api = 3
+
+# Reintentos máximos para descarga de archivos individuales
+retries_file = 7
+
+[templates.kemono]
+# Workers específicos para kemono (conservador por sus rate limits)
+workers = 3
+# Servicios soportados: patreon, fanbox, discord, fantia, afdian, boosty, dlsite, gumroad, subscribestar

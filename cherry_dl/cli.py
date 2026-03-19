@@ -1,0 +1,414 @@
+"""
+Interfaz de línea de comandos para cherry-dl.
+
+Comandos disponibles:
+  download  — Descarga todos los archivos de un artista desde una URL
+  organize  — Incorpora archivos externos al catálogo
+  status    — Lista las colecciones indexadas
+  relink    — Actualiza la ruta de carpeta de un artista movido
+  config    — Ver/editar configuración de usuario
+"""
+
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+from typing import Optional
+
+import typer
+from rich.console import Console
+from rich.table import Table
+
+app = typer.Typer(
+    name="cherry-dl",
+    help="Mass downloader modular con catálogo inteligente.",
+    add_completion=False,
+)
+console = Console()
+
+config_app = typer.Typer(help="Gestión de configuración.")
+app.add_typer(config_app, name="config")
+
+
+# ── Helpers async ──────────────────────────────────────────────────────────────
+
+def run(coro):
+    """Ejecuta una coroutine en el event loop."""
+    return asyncio.run(coro)
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# DOWNLOAD
+# ════════════════════════════════════════════════════════════════════════════════
+
+@app.command()
+def download(
+    url: str = typer.Argument(..., help="URL del artista (ej: https://kemono.cr/patreon/user/123)"),
+    workers: Optional[int] = typer.Option(None, "--workers", "-w", help="Descargas paralelas (default: config)"),
+    prescan: Optional[str] = typer.Option(None, "--prescan", "-p",
+        help="Carpeta con archivos existentes a indexar antes de descargar"),
+):
+    """Descarga todos los archivos de un artista."""
+    run(_download(url, workers, prescan))
+
+
+async def _download(url: str, workers: int | None, prescan: str | None = None) -> None:
+    from .config import load_config, ensure_dirs, INDEX_DB
+    from .engine import DownloadEngine, make_progress
+    from .templates._registry import get_template
+    from .catalog import init_catalog, hash_exists, add_file, next_counter
+    from .gui.bridge import build_filename
+    from .index import init_index, get_or_create_site, get_or_create_artist
+
+    config = load_config()
+    ensure_dirs(config)
+
+    # Detectar template
+    engine_workers = workers or config.workers
+    async with DownloadEngine(config, workers=engine_workers) as engine:
+        template = get_template(url, engine)
+        if template is None:
+            console.print(f"[red]✗ No hay template para esta URL:[/red] {url}")
+            console.print(f"  Templates disponibles: {_list_templates()}")
+            raise typer.Exit(1)
+
+        console.print(f"[bold green]cherry-dl[/bold green] — Template: [cyan]{template.name}[/cyan]")
+        console.print(f"  URL: {url}")
+
+        # Info del artista
+        console.print("  Obteniendo información del artista...")
+        try:
+            artist = await template.get_artist_info(url)
+        except Exception as e:
+            console.print(f"[red]✗ Error al obtener info del artista:[/red] {e}")
+            raise typer.Exit(1)
+
+        console.print(f"  Artista: [bold]{artist.name}[/bold] ({artist.service})")
+
+        # Directorio destino
+        artist_dir = config.download_path / artist.site / _safe_dirname(artist.name)
+        artist_dir.mkdir(parents=True, exist_ok=True)
+        console.print(f"  Destino: [dim]{artist_dir}[/dim]")
+
+        # Inicializar catálogo e índice
+        await init_catalog(artist_dir)
+        await init_index(INDEX_DB)
+        site_id = await get_or_create_site(INDEX_DB, artist.site)
+        await get_or_create_artist(
+            db_path=INDEX_DB,
+            site_id=site_id,
+            artist_id=artist.artist_id,
+            name=artist.name,
+            folder_path=artist_dir,
+        )
+
+        # Pre-scan de carpeta existente (opcional)
+        if prescan:
+            from pathlib import Path as _Path
+            from .organizer import organize
+            prescan_path = _Path(prescan)
+            if not prescan_path.is_dir():
+                console.print(f"[red]✗ La ruta de pre-scan no existe:[/red] {prescan}")
+                raise typer.Exit(1)
+
+            console.print(f"\n  [cyan]Pre-scan:[/cyan] {prescan_path}")
+            console.print("  Escaneando y renombrando archivos existentes…")
+
+            def _prescan_cb(processed: int, total: int, filename: str) -> None:
+                console.print(f"    [{processed}/{total}] {filename[:60]}", highlight=False)
+
+            scan_result, _ = await organize(
+                source_dir=prescan_path,
+                artist_name=artist.name,
+                artist_id=artist.artist_id,
+                site=artist.site,
+                dest_root=config.download_path,
+                progress_cb=_prescan_cb,
+            )
+            console.print(f"  Pre-scan listo: {scan_result.summary()}\n")
+
+        # Iterar y descargar
+        downloaded = skipped = errors = 0
+
+        with make_progress() as progress:
+            overall = progress.add_task(
+                f"[bold]{artist.name}[/bold]", total=None
+            )
+
+            async for file_info in template.iter_files(artist):
+                # Obtener contador y construir nombre final antes de descargar
+                counter = await next_counter(artist_dir)
+                final_name = build_filename(artist.name, counter, file_info.filename)
+
+                result = await engine.download(
+                    url=file_info.url,
+                    dest_dir=artist_dir,
+                    filename=final_name,
+                    progress=progress,
+                )
+
+                if not result.ok:
+                    errors += 1
+                    console.print(f"[red]  ✗ {file_info.filename}:[/red] {result.error}")
+                    continue
+
+                # Verificar hash contra catálogo
+                if await hash_exists(artist_dir, result.file_hash):
+                    # Duplicado — eliminar el archivo recién descargado
+                    if result.dest and result.dest.exists():
+                        result.dest.unlink()
+                    skipped += 1
+                else:
+                    # Nuevo — registrar en catálogo
+                    await add_file(
+                        artist_dir=artist_dir,
+                        file_hash=result.file_hash,
+                        filename=final_name,
+                        url_source=file_info.url,
+                        file_size=result.file_size,
+                        counter=counter,
+                    )
+                    downloaded += 1
+
+                progress.advance(overall)
+
+    # Resumen final
+    console.print()
+    console.print(f"[bold green]✓ Completado[/bold green] — {artist.name}")
+    console.print(f"  Descargados: [green]{downloaded}[/green]")
+    console.print(f"  Duplicados ignorados: [yellow]{skipped}[/yellow]")
+    if errors:
+        console.print(f"  Errores: [red]{errors}[/red]")
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# ORGANIZE
+# ════════════════════════════════════════════════════════════════════════════════
+
+@app.command()
+def organize(
+    source: str = typer.Argument(..., help="Ruta de carpeta con archivos a incorporar"),
+    site: str = typer.Option(..., "--site", "-s", help="Nombre del sitio (ej: kemono)"),
+    artist: str = typer.Option(..., "--artist", "-a", help="ID o nombre del artista"),
+    name: Optional[str] = typer.Option(None, "--name", "-n", help="Nombre legible del artista (opcional)"),
+):
+    """Incorpora archivos externos al catálogo de cherry-dl."""
+    run(_organize(source, site, artist, name or artist))
+
+
+async def _organize(source: str, site: str, artist_id: str, artist_name: str) -> None:
+    from .config import load_config, ensure_dirs
+    from .organizer import organize as do_organize
+
+    source_path = Path(source)
+    if not source_path.is_dir():
+        console.print(f"[red]✗ La ruta no existe o no es un directorio:[/red] {source}")
+        raise typer.Exit(1)
+
+    config = load_config()
+    ensure_dirs(config)
+
+    console.print(f"[bold green]cherry-dl organize[/bold green]")
+    console.print(f"  Fuente: [dim]{source_path}[/dim]")
+    console.print(f"  Sitio:  {site} | Artista: {artist_name}")
+
+    result = await do_organize(
+        source_dir=source_path,
+        site=site,
+        artist_id=artist_id,
+        artist_name=artist_name,
+        dest_root=config.download_path,
+    )
+
+    console.print()
+    console.print(f"[bold green]✓ Organización completa[/bold green]")
+    console.print(f"  {result.summary()}")
+    if result.errors:
+        console.print(f"[red]  Errores encontrados:[/red]")
+        for err in result.errors[:10]:
+            console.print(f"    - {err}")
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# STATUS
+# ════════════════════════════════════════════════════════════════════════════════
+
+@app.command()
+def status():
+    """Lista todas las colecciones indexadas."""
+    run(_status())
+
+
+async def _status() -> None:
+    from .config import load_config, INDEX_DB
+    from .index import init_index, list_all
+    from .catalog import get_stats
+
+    config = load_config()
+    await init_index(INDEX_DB)
+
+    artists = await list_all(INDEX_DB)
+
+    if not artists:
+        console.print("[yellow]No hay colecciones indexadas.[/yellow]")
+        console.print(f"  Usa [bold]cherry-dl download <url>[/bold] para iniciar.")
+        return
+
+    table = Table(title="Colecciones cherry-dl", show_lines=True)
+    table.add_column("Sitio", style="cyan", no_wrap=True)
+    table.add_column("Artista", style="bold")
+    table.add_column("ID", style="dim")
+    table.add_column("Archivos", justify="right")
+    table.add_column("Tamaño", justify="right")
+    table.add_column("Ruta", style="dim", overflow="fold")
+
+    total_files = 0
+    total_size = 0
+
+    for a in artists:
+        folder = Path(a["folder_path"])
+        stats = await get_stats(folder) if folder.exists() else {"total": 0, "total_size": 0}
+
+        total_files += stats["total"]
+        total_size += stats["total_size"]
+
+        table.add_row(
+            a["site"],
+            a["name"],
+            a["artist_id"],
+            str(stats["total"]),
+            _fmt_size(stats["total_size"]),
+            str(folder),
+        )
+
+    console.print(table)
+    console.print(
+        f"\n  Total: [bold]{len(artists)}[/bold] artistas | "
+        f"[bold]{total_files:,}[/bold] archivos | "
+        f"[bold]{_fmt_size(total_size)}[/bold]"
+    )
+    console.print(f"  Directorio base: [dim]{config.download_dir}[/dim]")
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# RELINK
+# ════════════════════════════════════════════════════════════════════════════════
+
+@app.command()
+def relink(
+    artist_id: str = typer.Argument(..., help="ID del artista en el sitio"),
+    site: str = typer.Option(..., "--site", "-s", help="Nombre del sitio"),
+    new_path: str = typer.Option(..., "--path", "-p", help="Nueva ruta de la carpeta del artista"),
+):
+    """Actualiza la ruta de carpeta de un artista movido."""
+    run(_relink(artist_id, site, new_path))
+
+
+async def _relink(artist_id: str, site: str, new_path: str) -> None:
+    from .config import INDEX_DB
+    from .index import init_index, relink_artist
+
+    path = Path(new_path)
+    if not path.is_dir():
+        console.print(f"[red]✗ La ruta no existe:[/red] {new_path}")
+        raise typer.Exit(1)
+
+    await init_index(INDEX_DB)
+    ok = await relink_artist(INDEX_DB, artist_id, site, path)
+
+    if ok:
+        console.print(f"[green]✓ Ruta actualizada[/green] para {site}/{artist_id}")
+        console.print(f"  Nueva ruta: [dim]{path}[/dim]")
+    else:
+        console.print(f"[red]✗ Artista no encontrado:[/red] {site}/{artist_id}")
+        console.print("  Usa [bold]cherry-dl status[/bold] para ver artistas indexados.")
+        raise typer.Exit(1)
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# CONFIG
+# ════════════════════════════════════════════════════════════════════════════════
+
+@config_app.command("show")
+def config_show():
+    """Muestra la configuración actual."""
+    from .config import load_config, CONFIG_FILE
+
+    config = load_config()
+    table = Table(title="Configuración cherry-dl", show_header=False)
+    table.add_column("Clave", style="cyan")
+    table.add_column("Valor")
+
+    table.add_row("download_dir", str(config.download_dir))
+    table.add_row("workers", str(config.workers))
+    table.add_row("timeout", f"{config.timeout}s")
+    table.add_row("delay_min", f"{config.network.delay_min}s")
+    table.add_row("delay_max", f"{config.network.delay_max}s")
+    table.add_row("retries_api", str(config.network.retries_api))
+    table.add_row("retries_file", str(config.network.retries_file))
+
+    console.print(table)
+    console.print(f"\n  Archivo: [dim]{CONFIG_FILE}[/dim]")
+
+
+@config_app.command("set")
+def config_set(
+    key: str = typer.Argument(..., help="Clave a modificar (download_dir, workers, timeout)"),
+    value: str = typer.Argument(..., help="Nuevo valor"),
+):
+    """Modifica una clave de configuración."""
+    from .config import set_config_value
+
+    try:
+        config = set_config_value(key, value)
+        console.print(f"[green]✓[/green] {key} = {value}")
+    except ValueError as e:
+        console.print(f"[red]✗ {e}[/red]")
+        raise typer.Exit(1)
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# Helpers internos
+# ════════════════════════════════════════════════════════════════════════════════
+
+def _safe_dirname(name: str) -> str:
+    invalid = r'\/:*?"<>|'
+    for ch in invalid:
+        name = name.replace(ch, "_")
+    return name.strip("._") or "unknown"
+
+
+def _fmt_size(n: int) -> str:
+    """Formatea bytes a unidad legible."""
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024:
+            return f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} PB"
+
+
+def _list_templates() -> str:
+    from .templates._registry import list_templates
+    return ", ".join(list_templates())
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# GUI
+# ════════════════════════════════════════════════════════════════════════════════
+
+@app.command()
+def gui():
+    """Lanza la interfaz gráfica (Dear PyGui)."""
+    try:
+        from .gui.app import run_app
+    except ImportError:
+        console.print("[red]✗ dearpygui no instalado.[/red]")
+        console.print("  Ejecuta: [bold]./run.sh[/bold] para instalar dependencias.")
+        raise typer.Exit(1)
+    run_app()
+
+
+# ── Entry point ────────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    app()
