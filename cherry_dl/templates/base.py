@@ -77,10 +77,14 @@ class SiteTemplate(ABC):
         ...
 
     @abstractmethod
-    async def iter_files(self, artist: ArtistInfo) -> AsyncIterator[FileInfo]:
+    def iter_files(self, artist: ArtistInfo) -> AsyncIterator[FileInfo]:
         """
         Genera todos los archivos disponibles para un artista.
         Implementa paginación interna según el sitio.
+
+        Las subclases deben implementarlo como async generator (async def + yield).
+        Declararlo como `def` aquí permite que Pyright infiera correctamente el tipo
+        de retorno en los llamadores sin envolverlo en una coroutine.
         """
         ...
 

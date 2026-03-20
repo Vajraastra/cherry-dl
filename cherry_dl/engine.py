@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import random
 from pathlib import Path
-from typing import AsyncIterator
+from typing import AsyncIterator, Callable
 
 import httpx
 from rich.progress import (
@@ -49,7 +49,12 @@ class ErrorKind:
     SERVER       = "server_error" # 5xx — error del servidor; reintentar
     NETWORK      = "network"      # error de conexión; reintentar
     TIMEOUT      = "timeout"      # tiempo de espera; reintentar
+    STALL        = "stall"        # descarga iniciada pero sin datos por N s; diferir
     UNKNOWN      = "unknown"      # otro error no clasificado
+
+    # Tipos que deben ir a la cola diferida en lugar de descartarse
+    DEFERRABLE = {"stall", "timeout", "network", "server_error", "cloudflare",
+                  "rate_limit"}
 
 
 # ── Constantes ─────────────────────────────────────────────────────────────────
@@ -167,14 +172,19 @@ class DownloadEngine:
         filename: str,
         progress: Progress | None = None,
         task_id: TaskID | None = None,
+        on_progress: Callable[[int, int], None] | None = None,
     ) -> DownloadResult:
         """
         Descarga un archivo al directorio destino.
         Respeta el semáforo del pool (max N descargas simultáneas).
         Retorna DownloadResult con hash SHA-256 y tamaño.
+
+        on_progress: callback(bytes_done, total_bytes) invocado en cada chunk.
         """
         async with self._semaphore:
-            return await self._do_download(url, dest_dir, filename, progress, task_id)
+            return await self._do_download(
+                url, dest_dir, filename, progress, task_id, on_progress
+            )
 
     async def run_queue(
         self,
@@ -289,6 +299,7 @@ class DownloadEngine:
         filename: str,
         progress: Progress | None,
         task_id: TaskID | None,
+        on_progress: Callable[[int, int], None] | None = None,
     ) -> DownloadResult:
         """
         Descarga un archivo con retry clasificado por tipo de error.
@@ -364,18 +375,43 @@ class DownloadEngine:
                     if progress and task_id is not None:
                         progress.update(task_id, total=content_length or None)
 
-                    async for chunk in resp.aiter_bytes(chunk_size=65536):
-                        chunks.append(chunk)
-                        total += len(chunk)
-                        if progress and task_id is not None:
-                            progress.update(task_id, advance=len(chunk))
+                    stall_sec = self.config.network.stall_timeout
+                    _total_bytes = content_length  # capturado en closure de _collect
+
+                    async def _collect() -> None:
+                        async for chunk in resp.aiter_bytes(chunk_size=65536):
+                            chunks.append(chunk)
+                            total_ref[0] += len(chunk)
+                            if progress and task_id is not None:
+                                progress.update(task_id, advance=len(chunk))
+                            if on_progress:
+                                on_progress(total_ref[0], _total_bytes)
+
+                    total_ref = [0]
+                    try:
+                        await asyncio.wait_for(_collect(), timeout=stall_sec)
+                    except asyncio.TimeoutError:
+                        last_error = (
+                            f"Stall — sin datos por {stall_sec}s"
+                        )
+                        last_kind = ErrorKind.STALL
+                        continue
+                    total = total_ref[0]
 
                 data = b"".join(chunks)
                 file_hash = sha256_bytes(data)
 
                 dest_dir.mkdir(parents=True, exist_ok=True)
                 dest_file = dest_dir / filename
-                dest_file.write_bytes(data)
+                # Escribir a .tmp y renombrar atómicamente para evitar
+                # archivos corruptos si el proceso termina inesperadamente.
+                tmp_file = dest_dir / (filename + ".tmp")
+                try:
+                    tmp_file.write_bytes(data)
+                    tmp_file.rename(dest_file)
+                except OSError:
+                    tmp_file.unlink(missing_ok=True)
+                    raise
 
                 if progress and task_id is not None:
                     progress.update(task_id, description=f"[green]{filename[:40]}")

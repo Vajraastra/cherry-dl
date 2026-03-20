@@ -152,6 +152,9 @@ async def _download(url: str, workers: int | None, prescan: str | None = None) -
                     console.print(f"[red]  ✗ {file_info.filename}:[/red] {result.error}")
                     continue
 
+                # Cuando ok=True el engine garantiza file_hash no-None
+                assert result.file_hash is not None
+
                 # Verificar hash contra catálogo
                 if await hash_exists(artist_dir, result.file_hash):
                     # Duplicado — eliminar el archivo recién descargado
@@ -212,7 +215,7 @@ async def _organize(source: str, site: str, artist_id: str, artist_name: str) ->
     console.print(f"  Fuente: [dim]{source_path}[/dim]")
     console.print(f"  Sitio:  {site} | Artista: {artist_name}")
 
-    result = await do_organize(
+    result, _ = await do_organize(
         source_dir=source_path,
         site=site,
         artist_id=artist_id,
@@ -380,11 +383,12 @@ def _safe_dirname(name: str) -> str:
 
 def _fmt_size(n: int) -> str:
     """Formatea bytes a unidad legible."""
+    size: float = float(n)
     for unit in ("B", "KB", "MB", "GB", "TB"):
-        if n < 1024:
-            return f"{n:.1f} {unit}"
-        n /= 1024
-    return f"{n:.1f} PB"
+        if size < 1024:
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} PB"
 
 
 def _list_templates() -> str:
@@ -398,12 +402,12 @@ def _list_templates() -> str:
 
 @app.command()
 def gui():
-    """Lanza la interfaz gráfica (Dear PyGui)."""
+    """Lanza la interfaz gráfica (PySide6)."""
     try:
         from .gui.app import run_app
     except ImportError:
-        console.print("[red]✗ dearpygui no instalado.[/red]")
-        console.print("  Ejecuta: [bold]./run.sh[/bold] para instalar dependencias.")
+        console.print("[red]✗ GUI no disponible.[/red]")
+        console.print("  Ejecuta: [bold]./run.sh[/bold] para instalar dependencias (PySide6).")
         raise typer.Exit(1)
     run_app()
 

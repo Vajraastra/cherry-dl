@@ -26,6 +26,7 @@ class NetworkConfig(BaseModel):
     delay_max: float = Field(30.0, ge=0)
     retries_api: int = Field(6, ge=1)
     retries_file: int = Field(7, ge=1)
+    stall_timeout: int = Field(120, ge=10)  # segundos sin datos → stall
 
     @field_validator("delay_max")
     @classmethod
@@ -107,6 +108,7 @@ def save_config(config: UserConfig) -> None:
         f"delay_max = {config.network.delay_max}\n",
         f"retries_api = {config.network.retries_api}\n",
         f"retries_file = {config.network.retries_file}\n",
+        f"stall_timeout = {config.network.stall_timeout}\n",
     ]
 
     for name, tmpl in config.templates.items():

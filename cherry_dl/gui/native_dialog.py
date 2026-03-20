@@ -36,6 +36,15 @@ def pick_directory(
     threading.Thread(target=_run, daemon=True, name="native-dialog").start()
 
 
+def pick_directory_sync(title: str, start_dir: str = "") -> str:
+    """
+    Versión síncrona para Qt slots: bloquea brevemente mientras el
+    usuario interactúa con el diálogo nativo (comportamiento modal normal).
+    Retorna la ruta elegida o '' si el usuario cancela.
+    """
+    return _open_dialog(title, start_dir)
+
+
 # ── Backends ──────────────────────────────────────────────────────────────────
 
 def _open_dialog(title: str, start_dir: str) -> str:

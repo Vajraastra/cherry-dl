@@ -613,8 +613,18 @@ async def _build_local_hash_map(artist_dir: Path) -> dict[str, Path]:
     Hashea todos los archivos de medios existentes en artist_dir.
     Retorna {sha256: path} para detectar archivos con nombres incorrectos.
     Se ejecuta en un executor para no bloquear el event loop.
+
+    Limpia archivos .tmp huérfanos (escrituras interrumpidas por crash).
     """
     from ..hasher import sha256_file
+
+    # Eliminar .tmp huérfanos de sesiones anteriores que se interrumpieron
+    for tmp in artist_dir.iterdir():
+        if tmp.is_file() and tmp.name.endswith(".tmp"):
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
 
     files = [
         f for f in artist_dir.iterdir()
