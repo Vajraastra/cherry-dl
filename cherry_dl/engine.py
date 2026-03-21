@@ -38,6 +38,36 @@ from tenacity import (
 from .config import UserConfig, load_session, save_session
 from .hasher import sha256_bytes
 
+
+# ── Helpers de I/O en thread ───────────────────────────────────────────────────
+
+def _finalize_download(
+    chunks: list[bytes],
+    tmp_file: Path,
+    dest_file: Path,
+) -> str:
+    """
+    Une los chunks, calcula el hash SHA-256, escribe el archivo .tmp y lo
+    renombra atómicamente al destino final.
+
+    Se ejecuta en un thread executor para no bloquear el event loop de asyncio:
+    tanto b"".join() como sha256_bytes() y write_bytes() son operaciones
+    CPU/I/O síncronas que pueden tardar varios segundos en archivos grandes.
+
+    Retorna el hash SHA-256 del archivo.
+    """
+    data = b"".join(chunks)
+    file_hash = sha256_bytes(data)
+    dest_file.parent.mkdir(parents=True, exist_ok=True)
+    tmp_file.write_bytes(data)
+    try:
+        tmp_file.rename(dest_file)
+    except OSError:
+        tmp_file.unlink(missing_ok=True)
+        raise
+    return file_hash
+
+
 # ── Clasificación de errores ───────────────────────────────────────────────────
 
 class ErrorKind:
@@ -126,12 +156,23 @@ class DownloadEngine:
         self._session_cookies: dict[str, str] = load_session()
 
     async def __aenter__(self) -> "DownloadEngine":
+        # Timeout de conexión y escritura = config.timeout (corto, 30 s).
+        # Timeout de lectura = stall_timeout (largo, 120 s por defecto).
+        # httpx aplica el read_timeout POR CHUNK: si el servidor no envía
+        # ningún byte en stall_timeout segundos, lanza ReadTimeout, que es
+        # subclase de TimeoutException y se reintenta con backoff.
+        # Esto reemplaza cualquier mecanismo de watchdog manual.
         self._client = httpx.AsyncClient(
             headers=_DDG_HEADERS,
             cookies=self._session_cookies,
             http2=True,
             follow_redirects=True,
-            timeout=self.config.timeout,
+            timeout=httpx.Timeout(
+                connect=self.config.timeout,
+                read=self.config.network.stall_timeout,
+                write=self.config.timeout,
+                pool=self.config.timeout,
+            ),
         )
         return self
 
@@ -375,43 +416,31 @@ class DownloadEngine:
                     if progress and task_id is not None:
                         progress.update(task_id, total=content_length or None)
 
-                    stall_sec = self.config.network.stall_timeout
-                    _total_bytes = content_length  # capturado en closure de _collect
+                    # El stall se detecta automáticamente vía httpx:
+                    # read_timeout = stall_timeout (configurado en __aenter__).
+                    # Si el servidor no envía ningún byte durante stall_timeout
+                    # segundos, httpx lanza ReadTimeout → reintento con backoff.
+                    # No se usan Tasks separadas para evitar corrupción del
+                    # estado HTTP/2 al cancelar mid-stream.
+                    _total_bytes = content_length
+                    total = 0
 
-                    async def _collect() -> None:
-                        async for chunk in resp.aiter_bytes(chunk_size=65536):
-                            chunks.append(chunk)
-                            total_ref[0] += len(chunk)
-                            if progress and task_id is not None:
-                                progress.update(task_id, advance=len(chunk))
-                            if on_progress:
-                                on_progress(total_ref[0], _total_bytes)
+                    async for chunk in resp.aiter_bytes(chunk_size=65536):
+                        chunks.append(chunk)
+                        total += len(chunk)
+                        if progress and task_id is not None:
+                            progress.update(task_id, advance=len(chunk))
+                        if on_progress:
+                            on_progress(total, _total_bytes)
 
-                    total_ref = [0]
-                    try:
-                        await asyncio.wait_for(_collect(), timeout=stall_sec)
-                    except asyncio.TimeoutError:
-                        last_error = (
-                            f"Stall — sin datos por {stall_sec}s"
-                        )
-                        last_kind = ErrorKind.STALL
-                        continue
-                    total = total_ref[0]
-
-                data = b"".join(chunks)
-                file_hash = sha256_bytes(data)
-
-                dest_dir.mkdir(parents=True, exist_ok=True)
                 dest_file = dest_dir / filename
-                # Escribir a .tmp y renombrar atómicamente para evitar
-                # archivos corruptos si el proceso termina inesperadamente.
-                tmp_file = dest_dir / (filename + ".tmp")
-                try:
-                    tmp_file.write_bytes(data)
-                    tmp_file.rename(dest_file)
-                except OSError:
-                    tmp_file.unlink(missing_ok=True)
-                    raise
+                tmp_file  = dest_dir / (filename + ".tmp")
+
+                # Mover join+hash+write+rename a thread para no bloquear
+                # el event loop durante operaciones CPU/I/O pesadas.
+                file_hash = await asyncio.to_thread(
+                    _finalize_download, chunks, tmp_file, dest_file
+                )
 
                 if progress and task_id is not None:
                     progress.update(task_id, description=f"[green]{filename[:40]}")

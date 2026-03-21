@@ -252,6 +252,55 @@ Workers: [3]   Filtro: [_______] □ Excluir
 
 ---
 
+## 2026-03-20 — TUI Textual (Fase 3) — COMPLETA
+
+### Motivación
+La GUI PySide6 requería un entorno gráfico (X11/Wayland). Se decidió construir
+una TUI con **Textual** para mayor portabilidad (funciona en terminal SSH, tmux, etc.)
+y menor overhead de dependencias en sistemas headless.
+
+### Arquitectura TUI
+```
+cherry_dl/tui/
+  __init__.py       — módulo
+  app.py            — app completa (~1500 líneas)
+  theme.tcss        — tema cherry oscuro (misma paleta que GUI PySide6)
+```
+
+**Pantallas y clases clave:**
+- `ProfilesScreen` — lista de perfiles con DataTable + toolbar de botones
+- `ArtistScreen` — detalle/descarga: workers, log, semáforo, contadores, barra de estado docked
+- `SettingsScreen` — configuración global con grid 2 columnas
+- `NewProfileModal` — wizard completo: resolver URL via API, nombre/carpeta auto, workers, filtro ext, "Crear y descargar"
+- `AddUrlModal` — modal agregar URL a perfil existente
+- `InputContextMenu` — menú contextual (clic derecho): Pegar / Seleccionar todo / Limpiar
+- `ClipInput` — subclase de Input con `action_paste` + `on_paste` usando portapapeles del sistema
+- `WorkerRow` — fila de worker con barra de progreso y velocidad
+
+**Dependencia nueva:** `textual>=0.70.0` (instalado: 8.1.1)
+**Comando nuevo:** `cherry-dl tui`
+**`run.sh`:** sin args → lanza TUI (antes lanzaba GUI PySide6)
+
+### Bugs corregidos en esta sesión
+
+| # | Problema | Solución |
+|---|----------|----------|
+| 1 | `border-radius` inválido en TCSS | Eliminado — Textual no lo soporta |
+| 2 | `status-bar` desaparecía — `1fr` del log consumía todo el espacio | `dock: bottom` en CSS |
+| 3 | Workers input invisiblemente pequeño | `width: 6` → `width: 10` |
+| 4 | `ProfilesScreen` sin botones — solo teclas | Toolbar con 4 botones añadida |
+| 5 | `NewProfileModal` sin opciones (solo 3 campos) | Reescrito: resolver URL, nombre/carpeta auto, workers, filtro, "Crear y descargar" |
+| 6 | `_create_profile` pasaba `url=` a `create_profile()` que no lo acepta | Separado en `create_profile()` + `add_profile_url()` + `update_profile_ext_filter()` |
+| 7 | Sin soporte de portapapeles | `_read_clipboard()` (wl-paste/xclip/xsel) + `ClipInput` + `InputContextMenu` |
+
+### Portapapeles — arquitectura
+- `_read_clipboard()`: llama `wl-paste --no-newline` (Wayland) → xclip → xsel como fallback
+- `ClipInput(Input)`: sobreescribe `action_paste` (ctrl+v via Textual) y `on_paste` (bracketed paste del terminal)
+- `InputContextMenu`: modal con 3 opciones, se abre con clic derecho en cualquier Input
+- App-level `ctrl+v` binding como capa extra de fallback
+
+---
+
 ## 2026-03-18 — Inicio del proyecto
 
 ### Arquitectura definida
@@ -283,8 +332,33 @@ al nuevo scope. Se migra a **PySide6 + qasync**.
 
 ---
 
-## Errores encontrados
-<!-- Formato: fecha | error | causa | solución -->
+## Errores encontrados y soluciones
+
+### 2026-03-20 — file_count y last_synced nunca se actualizaban en la tabla de fuentes
+**Síntoma:** tras completar una descarga, la tabla de fuentes seguía mostrando 0 archivos y "Nunca" en última sync. El estado correcto aparecía solo al reiniciar la aplicación.
+**Causa:** `_do_download` no llamaba a `update_profile_url_sync` al terminar cada fuente.
+**Solución:** agregar `update_profile_url_sync(INDEX_DB, pu["id"], file_count=new_count)` tras el `asyncio.gather`, y llamar `_refresh_source_row()` para actualizar la UI inmediatamente sin reiniciar.
+
+### 2026-03-20 — Entrada "migrado" duplicada en tabla de fuentes
+**Síntoma:** al terminar una descarga, la tabla mostraba dos filas para la misma fuente — una real (con URL) y una migrada (sin URL).
+**Causa:** la migración en `init_index` creaba una entrada `url=NULL` al iniciar la app. El wizard ya había creado una entrada real con URL. Al llamar `init_index` en cada descarga, la migración volvía a insertar la entrada nula si la real no tenía `artist_id` aún.
+**Solución (doble):**
+  1. Llamar `update_profile_url_sync(..., artist_id=artist_info.artist_id)` al inicio de `_do_download`, antes de cualquier paginación. Esto popula `artist_id` en la entrada real.
+  2. Agregar en `init_index` un DELETE que elimina entradas `url=NULL` cuando ya existe una entrada real con el mismo `artist_id` + `site`.
+
+### 2026-03-20 — stall_timeout no se persistía en config.toml
+**Síntoma:** cambiar el timeout de stall en Settings no tenía efecto tras reiniciar.
+**Causa:** `save_config()` en `config.py` no incluía la línea `stall_timeout`.
+**Solución:** agregar `f"stall_timeout = {config.network.stall_timeout}\n"` en `save_config`.
+
+### 2026-03-20 — Archivos descargados múltiples veces (mismo contenido, copias con nombres diferentes)
+**Síntoma:** un mismo archivo aparecía descargado varias veces con distintos prefijos `Artist_NNNNN_`.
+**Causa 1 (inter-sesión):** `local_hashes` se construye al inicio de la fuente escaneando el disco. Si un archivo existía con nombre incorrecto, se intentaba renombrar Y re-descargar en la misma sesión.
+**Causa 2 (intra-sesión, race condition):** el productor hacía las verificaciones de catálogo (`hash_exists`, `url_exists`) con `await` entre ellas. Dos workers podían pasar el check antes de que alguno hubiera catalogado el archivo.
+**Solución:** refactorizar al patrón **repartidor/workers**:
+  - *Repartidor* (producer): solo garantiza URLs únicas con `seen_urls: set[str]`. Sin consultas al catálogo.
+  - *Workers*: reciben una URL única cada uno, verifican catálogo por su cuenta, descargan y catalogan.
+  - `in_progress_hashes: set[str]` compartido entre workers: se verifica y se agrega sin await intermedio (operación atómica en asyncio), previniendo que dos workers procesen el mismo hash concurrentemente.
 
 ---
 
@@ -299,3 +373,39 @@ al nuevo scope. Se migra a **PySide6 + qasync**.
 | 2026-03-19 | Dear PyGui → PySide6 | DPG immediate-mode no escala al nuevo scope. PySide6 + qasync elimina el bridge de queue.Queue + hilo daemon |
 | 2026-03-19 | Perfiles de artista | Agrupar N fuentes bajo una carpeta. Carpeta base = primer servicio. Dedup via url_source (ya existe) + SHA-256 |
 | 2026-03-19 | url_source ya implementado | catalog.py ya tenía url_source y url_exists(). No requiere cambios en el engine |
+| 2026-03-20 | Patrón repartidor/workers | Productor solo dedup de URL, workers hacen consultas al catálogo. Elimina race conditions de dedup entre workers concurrentes |
+| 2026-03-20 | `in_progress_hashes` en workers | Set compartido verificado/actualizado sin await intermedio (atómico en asyncio). Previene descarga doble por mismo hash en URLs diferentes |
+| 2026-03-20 | `UPDATE … RETURNING value` en next_counter | Operación atómica en SQLite 3.35+. Elimina gap UPDATE→SELECT que podía asignar el mismo contador a dos workers |
+| 2026-03-20 | `asyncio.to_thread` para I/O en engine | `write_bytes`, `sha256_bytes` y `b"".join` son síncronos y bloqueaban el event loop. Extraídos a `_finalize_download()` en thread executor |
+| 2026-03-20 | Escritura atómica `.tmp` → rename | Previene archivos corruptos si el proceso termina mientras escribe. Rename es atómico en POSIX |
+| 2026-03-20 | Limpieza de `.tmp` en `_build_local_hash_map` | Elimina archivos `.tmp` huérfanos de sesiones interrumpidas antes de iniciar descarga |
+
+---
+
+## 2026-03-20 — GUI Fase 2: implementación completa + auditoría
+
+### Implementado en esta sesión
+
+**Nuevas funciones en `artist_detail_view.py`:**
+- Botón "⊘ Deduplicar": `_do_deduplicate()` escanea el catálogo, encuentra archivos con mismo hash en disco (nombres distintos), elimina duplicados y reporta espacio liberado
+- Semáforo de estado: `_lbl_semaphore` con 5 estados visuales — idle(gris), running(verde), cancelled(amarillo), error(rojo), done(azul)
+- Panel de workers en `QScrollArea`: siempre visible, max 5 filas visibles, scrollable si hay más
+- Log expandido con `stretch=1` y mensajes detallados con razón de skip/rename/error
+- `_refresh_source_row(url_id, file_count)`: actualiza la fila de la fuente en la tabla sin reiniciar la app
+- Contadores en barra inferior: descargados, saltados, errores, diferidos
+
+**Correcciones de bugs (auditoría sistemática):**
+
+| # | Archivo | Problema | Fix |
+|---|---------|----------|-----|
+| 1 | `engine.py` | `write_bytes`+`sha256` bloqueaban el event loop | Extraído a `_finalize_download()` + `asyncio.to_thread()` |
+| 2 | `catalog.py` | `next_counter` UPDATE→SELECT con gap vulnerable a race | `UPDATE … RETURNING value` (una sola instrucción atómica) |
+| 3 | `catalog.py` | `row[0]` sin validar si meta tabla está vacía | `RuntimeError` con mensaje descriptivo |
+| 4 | `artist_detail_view.py` | `unlink(result.dest)` tras rename fallido perdía el archivo | Si rename falla, eliminar `old_path` (duplicado), no `result.dest` |
+| 5 | `artist_detail_view.py` | `assert result.file_hash is not None` desactivable con `-O` | Reemplazado por `if/continue` con log de error |
+| 6 | `profiles_view.py` | `ensure_future` sin catch → pantalla en blanco infinita si falla | `add_done_callback(_on_task_done)` en todos los fire-and-forget |
+| 7 | `catalog.py` | Sin índice en `url_source` → table scan O(n) por archivo | `CREATE INDEX idx_url_source ON files(url_source)` |
+| 8 | `artist_detail_view.py` | Doble-clic en "Eliminar URL"/"Agregar URL" → operaciones duplicadas | Botón deshabilitado mientras la tarea asyncio corre |
+
+**Test de integración con URL real (kemono.cr/fanbox/user/55972648):**
+- 10/10 checks pasados: init_catalog, next_counter concurrente (5 workers), get_artist_info, iter_files, descarga real (115KB), add_file, hash_exists, url_exists, dedup, sin .tmp huérfanos

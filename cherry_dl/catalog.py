@@ -38,7 +38,13 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 """
 
+# idx_hash es redundante (hash ya es PRIMARY KEY), pero se mantiene por
+# compatibilidad con catálogos existentes que lo tengan creado.
 _CREATE_IDX = "CREATE INDEX IF NOT EXISTS idx_hash ON files(hash);"
+
+# Índice en url_source: url_exists() hace SELECT por esta columna en cada
+# archivo procesado → sin índice es un table scan O(n) por archivo.
+_CREATE_IDX_URL = "CREATE INDEX IF NOT EXISTS idx_url_source ON files(url_source);"
 
 # Migraciones para catálogos existentes creados antes de agregar estas columnas
 _MIGRATE_COUNTER = """
@@ -59,6 +65,7 @@ async def init_catalog(artist_dir: Path) -> None:
         await db.execute(_CREATE_FILES)
         await db.execute(_CREATE_META)
         await db.execute(_CREATE_IDX)
+        await db.execute(_CREATE_IDX_URL)
 
         # Migrar columna counter si no existe (catálogos previos)
         async with db.execute(
@@ -77,18 +84,24 @@ async def init_catalog(artist_dir: Path) -> None:
 async def next_counter(artist_dir: Path) -> int:
     """
     Incrementa atómicamente y retorna el siguiente número secuencial del artista.
-    SQLite serializa escrituras, por lo que esto es seguro con múltiples workers.
+
+    Usa UPDATE … RETURNING value (SQLite 3.35+) para obtener el nuevo valor
+    en una sola instrucción atómica — sin gap entre escritura y lectura que
+    otro worker pudiera aprovechar para obtener el mismo contador.
     """
     db_path = artist_dir / CATALOG_NAME
     async with aiosqlite.connect(db_path) as db:
-        await db.execute(
-            "UPDATE meta SET value = value + 1 WHERE key = 'counter'"
-        )
         async with db.execute(
-            "SELECT value FROM meta WHERE key = 'counter'"
+            "UPDATE meta SET value = value + 1 WHERE key = 'counter' RETURNING value"
         ) as cur:
             row = await cur.fetchone()
         await db.commit()
+
+    if row is None:
+        raise RuntimeError(
+            f"catalog.db corrompido: falta la fila 'counter' en meta ({db_path}). "
+            "Borra el archivo para regenerarlo."
+        )
     return row[0]
 
 

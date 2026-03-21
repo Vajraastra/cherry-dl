@@ -13,6 +13,7 @@ dependencies = [
     "tenacity>=8.3.0",
     "PySide6>=6.7.0",
     "qasync>=0.23.0",
+    "textual>=0.70.0",
 ]
 
 [build-system]

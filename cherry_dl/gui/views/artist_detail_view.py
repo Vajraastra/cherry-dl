@@ -45,6 +45,7 @@ from ...index import (
     add_profile_url,
     get_profile,
     set_profile_url_enabled,
+    update_profile_ext_filter,
     update_profile_last_checked,
 )
 
@@ -296,6 +297,7 @@ class ArtistDetailView(QWidget):
         self._btn_del_url.clicked.connect(self._on_del_url)
         self._btn_confirm_url.clicked.connect(self._on_confirm_add_url)
         self._btn_cancel_url.clicked.connect(lambda: self._add_url_widget.setVisible(False))
+        self._ext_filter.editingFinished.connect(self._on_ext_filter_changed)
 
     # ── API pública ────────────────────────────────────────────────────────────
 
@@ -372,10 +374,22 @@ class ArtistDetailView(QWidget):
         self._new_url_input.setFocus()
 
     def _on_confirm_add_url(self) -> None:
-        asyncio.ensure_future(self._add_url_async())
+        self._btn_confirm_url.setEnabled(False)
+        task = asyncio.ensure_future(self._add_url_async())
+        task.add_done_callback(lambda _: self._btn_confirm_url.setEnabled(True))
 
     def _on_del_url(self) -> None:
-        asyncio.ensure_future(self._del_url_async())
+        self._btn_del_url.setEnabled(False)
+        task = asyncio.ensure_future(self._del_url_async())
+        task.add_done_callback(lambda _: self._btn_del_url.setEnabled(True))
+
+    def _on_ext_filter_changed(self) -> None:
+        if not self._profile:
+            return
+        task = asyncio.ensure_future(
+            update_profile_ext_filter(INDEX_DB, self._profile["id"], self._ext_filter.text())
+        )
+        task.add_done_callback(lambda t: t.cancelled() or t.exception())
 
     # ── Helpers de UI ──────────────────────────────────────────────────────────
 
@@ -612,6 +626,7 @@ class ArtistDetailView(QWidget):
             # (idle — muestra las filas en estado "—")
             self._init_worker_slots(cfg_workers)
             self._populate_sources(profile["urls"])
+            self._ext_filter.setText(profile.get("ext_filter", ""))
             self._lbl_status.setText("Listo")
 
             if prescan_path:
@@ -847,10 +862,26 @@ class ArtistDetailView(QWidget):
                                     continue
 
                                 seen_urls.add(fi.url)
-                                await file_queue.put(fi)
+                                # Timeout de 120s en el put: si la cola lleva
+                                # demasiado tiempo llena es señal de que los
+                                # workers están colgados (deadlock). Levantar
+                                # TimeoutError rompe el ciclo y termina la sesión
+                                # con un mensaje claro en lugar de congelarse.
+                                await asyncio.wait_for(
+                                    file_queue.put(fi), timeout=120.0
+                                )
                         finally:
+                            # Señalizar fin a cada worker.
+                            # Si el productor es cerrado por GC o por un
+                            # event loop distinto (qasync reiniciado tras
+                            # cancelación), el await puede fallar con
+                            # RuntimeError → salir silenciosamente; los
+                            # workers ya están cancelados por asyncio.gather.
                             for _ in range(workers):
-                                await file_queue.put(None)
+                                try:
+                                    await file_queue.put(None)
+                                except RuntimeError:
+                                    break
 
                     # ── Workers ────────────────────────────────────────────
                     # Set compartido entre todos los workers para evitar que
@@ -928,16 +959,50 @@ class ArtistDetailView(QWidget):
                                 def make_cb(
                                     s: int,
                                 ) -> Callable[[int, int], None]:
+                                    # Throttle: actualizar la UI a 4 Hz máximo.
+                                    # Cada chunk es ~65 KB; a 10 MB/s eso son
+                                    # ~160 llamadas/s por worker → bloquea el
+                                    # event loop de qasync con operaciones Qt.
+                                    # Con el throttle solo se actualizan los
+                                    # widgets cada 250 ms independientemente de
+                                    # la velocidad de descarga.
+                                    _last: list[float] = [0.0]
+
                                     def cb(done: int, total: int) -> None:
+                                        now = time.monotonic()
+                                        if now - _last[0] < 0.25:
+                                            return
+                                        _last[0] = now
                                         self._worker_progress(s, done, total)
                                     return cb
 
-                                result = await engine.download(
-                                    url=fi.url,
-                                    dest_dir=folder,
-                                    filename=final_name,
-                                    on_progress=make_cb(slot_id),
-                                )
+                                # Timeout total por archivo: aunque el servidor
+                                # mande bytes esporádicos (reseteando el stall
+                                # por chunk), un archivo no puede tardar más de
+                                # 10 minutos en total antes de ser diferido.
+                                try:
+                                    result = await asyncio.wait_for(
+                                        engine.download(
+                                            url=fi.url,
+                                            dest_dir=folder,
+                                            filename=final_name,
+                                            on_progress=make_cb(slot_id),
+                                        ),
+                                        timeout=600.0,  # 10 min máx por archivo
+                                    )
+                                except asyncio.TimeoutError:
+                                    self._worker_done(slot_id, fi.filename, "⏸")
+                                    self._append_log(
+                                        f"  ⏸ {fi.filename[:55]}"
+                                        "  [timeout total — diferido]"
+                                    )
+                                    deferred.append((fi, artist_info, folder))
+                                    deferred_count_ref[0] += 1
+                                    self._update_counters(
+                                        downloaded_ref[0], skipped_ref[0],
+                                        errors_ref[0], deferred_count_ref[0],
+                                    )
+                                    continue
 
                                 if not result.ok:
                                     if result.error_kind in ErrorKind.DEFERRABLE:
@@ -966,20 +1031,41 @@ class ArtistDetailView(QWidget):
                                     )
                                     continue
 
-                                assert result.file_hash is not None
+                                if result.file_hash is None:
+                                    # No debería ocurrir: engine garantiza hash
+                                    # en descargas exitosas. Si pasa, es un bug.
+                                    errors_ref[0] += 1
+                                    self._append_log(
+                                        f"  ✗ {fi.filename[:50]}"
+                                        ":  bug interno — hash nulo tras descarga"
+                                    )
+                                    if result.dest and result.dest.exists():
+                                        result.dest.unlink()
+                                    continue
 
                                 # ── Catalogar resultado ────────────────────
                                 if result.file_hash in local_hashes:
-                                    # Existe en disco con otro nombre → renombrar
+                                    # Existe en disco con otro nombre → renombrar.
+                                    # new_path == result.dest (ambos = folder/final_name).
                                     old_path = local_hashes[result.file_hash]
                                     new_path = folder / final_name
                                     try:
                                         old_path.rename(new_path)
                                         local_hashes[result.file_hash] = new_path
-                                    except Exception:
-                                        new_path = old_path
-                                    if result.dest and result.dest.exists():
-                                        result.dest.unlink()
+                                        # Rename OK: result.dest es copia redundante
+                                        if result.dest and result.dest.exists():
+                                            result.dest.unlink()
+                                        renamed = True
+                                    except OSError:
+                                        # Rename falló (ej: destino ya existe = result.dest).
+                                        # result.dest ya está en la ubicación correcta;
+                                        # old_path es el duplicado → intentar borrarlo.
+                                        try:
+                                            old_path.unlink()
+                                        except OSError:
+                                            pass
+                                        local_hashes[result.file_hash] = result.dest
+                                        renamed = False
                                     await add_file(
                                         artist_dir=folder,
                                         file_hash=result.file_hash,
@@ -989,12 +1075,19 @@ class ArtistDetailView(QWidget):
                                         counter=counter,
                                     )
                                     downloaded_ref[0] += 1
-                                    self._worker_done(slot_id, final_name, "↷")
-                                    self._append_log(
-                                        f"  ↷ {old_path.name}"
-                                        f"  →  {final_name}"
-                                        "  [renombrado]"
-                                    )
+                                    if renamed:
+                                        self._worker_done(slot_id, final_name, "↷")
+                                        self._append_log(
+                                            f"  ↷ {old_path.name}"
+                                            f"  →  {final_name}"
+                                            "  [renombrado]"
+                                        )
+                                    else:
+                                        self._worker_done(slot_id, final_name, "✓")
+                                        self._append_log(
+                                            f"  ✓ {fi.filename[:40]}"
+                                            f"  →  {final_name}"
+                                        )
 
                                 else:
                                     # Archivo nuevo
@@ -1019,16 +1112,60 @@ class ArtistDetailView(QWidget):
                                     errors_ref[0], deferred_count_ref[0],
                                 )
 
+                            except asyncio.CancelledError:
+                                raise  # propagar cancelación normalmente
+                            except Exception as _exc:
+                                # Capturar cualquier excepción inesperada
+                                # (OSError de disco, ProtocolError de red, etc.)
+                                # para que UN archivo que falla no cancele
+                                # los otros workers en ejecución paralela.
+                                errors_ref[0] += 1
+                                import traceback as _tb
+                                _msg = f"{type(_exc).__name__}: {_exc}"
+                                self._worker_done(slot_id, fi.filename, "✗")
+                                self._append_log(
+                                    f"  ✗ {fi.filename[:45]}  [excepción] {_msg}"
+                                )
+                                self._append_log(
+                                    "    " + _tb.format_exc().splitlines()[-1]
+                                )
+                                self._update_counters(
+                                    downloaded_ref[0], skipped_ref[0],
+                                    errors_ref[0], deferred_count_ref[0],
+                                )
                             finally:
                                 # Liberar hash para que otros workers puedan
                                 # procesar contenido idéntico si fuera necesario
                                 if fi.remote_hash:
                                     in_progress_hashes.discard(fi.remote_hash)
 
-                    await asyncio.gather(
-                        producer(),
-                        *[worker_task(i) for i in range(workers)],
-                    )
+                    # Crear Tasks explícitas para que asyncio pueda
+                    # limpiarlas correctamente aunque el padre sea cancelado.
+                    # Con raw coroutines en gather, si el padre se cancela
+                    # antes de que gather envuelva las coroutines, quedan
+                    # como objetos huérfanos y Python imprime
+                    # "Exception ignored in: <coroutine object>".
+                    _all_tasks = [
+                        asyncio.create_task(producer(), name="producer"),
+                        *[
+                            asyncio.create_task(worker_task(i), name=f"worker-{i}")
+                            for i in range(workers)
+                        ],
+                    ]
+                    try:
+                        # return_exceptions=True: si un worker lanza una
+                        # excepción no capturada, los otros siguen corriendo.
+                        # (Cada worker ya atrapa su propia excepción, pero
+                        # este es un segundo nivel de seguridad.)
+                        await asyncio.gather(*_all_tasks, return_exceptions=True)
+                    except asyncio.CancelledError:
+                        # Cancelar explícitamente y esperar que todas las
+                        # tareas hijas terminen antes de propagar el error.
+                        # Esto evita Tasks huérfanas y los warnings de GC.
+                        for _t in _all_tasks:
+                            _t.cancel()
+                        await asyncio.gather(*_all_tasks, return_exceptions=True)
+                        raise
 
                     # Actualizar last_synced y file_count de esta fuente
                     # y refrescar la tabla de fuentes inmediatamente

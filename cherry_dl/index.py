@@ -43,9 +43,13 @@ CREATE TABLE IF NOT EXISTS profiles (
     folder_path  TEXT NOT NULL UNIQUE,  -- {download_dir}/{site_primario}/{nombre}/
     primary_site TEXT NOT NULL,         -- sitio de la URL con la que se creó
     created_at   TEXT,
-    last_checked TEXT
+    last_checked TEXT,
+    ext_filter   TEXT NOT NULL DEFAULT '' -- extensiones persistidas (p.ej. "jpg,png")
 );
 """
+
+# Migración para bases de datos existentes sin la columna ext_filter
+_MIGRATE_EXT_FILTER = "ALTER TABLE profiles ADD COLUMN ext_filter TEXT NOT NULL DEFAULT ''"
 
 _CREATE_PROFILE_URLS = """
 CREATE TABLE IF NOT EXISTS profile_urls (
@@ -87,6 +91,13 @@ async def init_index(db_path: Path) -> None:
         await db.execute(_CREATE_PROFILES)
         await db.execute(_CREATE_PROFILE_URLS)
         await db.execute(_CREATE_IDX_PROFILE_URLS)
+
+        # Migración: agregar ext_filter si no existe (bases de datos anteriores)
+        async with db.execute(
+            "SELECT name FROM pragma_table_info('profiles') WHERE name='ext_filter'"
+        ) as cur:
+            if not await cur.fetchone():
+                await db.execute(_MIGRATE_EXT_FILTER)
 
         # Migración: artistas existentes sin perfil → perfiles implícitos
         await db.execute("""
@@ -321,7 +332,8 @@ async def get_profile(db_path: Path, profile_id: int) -> dict | None:
     """
     async with aiosqlite.connect(db_path) as db:
         async with db.execute(
-            "SELECT id, display_name, folder_path, primary_site, created_at, last_checked "
+            "SELECT id, display_name, folder_path, primary_site, created_at, "
+            "last_checked, ext_filter "
             "FROM profiles WHERE id = ?",
             (profile_id,),
         ) as cur:
@@ -333,6 +345,7 @@ async def get_profile(db_path: Path, profile_id: int) -> dict | None:
         profile = {
             "id": row[0], "display_name": row[1], "folder_path": row[2],
             "primary_site": row[3], "created_at": row[4], "last_checked": row[5],
+            "ext_filter": row[6] or "",
         }
 
         async with db.execute(
@@ -426,6 +439,18 @@ async def update_profile_last_checked(db_path: Path, profile_id: int) -> None:
         await db.execute(
             "UPDATE profiles SET last_checked = datetime('now') WHERE id = ?",
             (profile_id,),
+        )
+        await db.commit()
+
+
+async def update_profile_ext_filter(
+    db_path: Path, profile_id: int, ext_filter: str
+) -> None:
+    """Persiste el filtro de extensiones del perfil."""
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            "UPDATE profiles SET ext_filter = ? WHERE id = ?",
+            (ext_filter.strip(), profile_id),
         )
         await db.commit()
 

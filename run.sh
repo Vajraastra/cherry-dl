@@ -66,9 +66,9 @@ echo "  OK: entorno listo."
 echo "[4/4] Lanzando cherry-dl..."
 echo "========================================="
 
-# Sin argumentos → abrir GUI. Con argumentos → modo CLI.
+# Sin argumentos → abrir TUI. Con argumentos → modo CLI.
 if [ $# -eq 0 ]; then
-    "$UV" run --python "$PYTHON_VERSION" python -m cherry_dl gui
+    "$UV" run --python "$PYTHON_VERSION" python -m cherry_dl tui
 else
     "$UV" run --python "$PYTHON_VERSION" python -m cherry_dl "$@"
 fi

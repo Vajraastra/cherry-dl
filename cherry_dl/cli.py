@@ -412,6 +412,18 @@ def gui():
     run_app()
 
 
+@app.command()
+def tui():
+    """Lanza la interfaz de texto (Textual TUI)."""
+    try:
+        from .tui.app import run
+    except ImportError:
+        console.print("[red]✗ TUI no disponible.[/red]")
+        console.print("  Ejecuta: [bold]./run.sh[/bold] para instalar dependencias (textual).")
+        raise typer.Exit(1)
+    run()
+
+
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

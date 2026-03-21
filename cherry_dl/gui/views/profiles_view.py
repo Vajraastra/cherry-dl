@@ -162,7 +162,17 @@ class ProfilesView(QWidget):
             QTimer.singleShot(0, self._schedule_load)
 
     def _schedule_load(self) -> None:
-        asyncio.ensure_future(self._load_data())
+        task = asyncio.ensure_future(self._load_data())
+        task.add_done_callback(self._on_task_done)
+
+    def _on_task_done(self, task: asyncio.Task) -> None:
+        """Captura excepciones no manejadas en tareas fire-and-forget."""
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            self._lbl_status.setText(f"Error inesperado: {exc}")
+            self._btn_refresh.setEnabled(True)
 
     # ── Carga async de datos ───────────────────────────────────────────────
 
@@ -277,7 +287,8 @@ class ProfilesView(QWidget):
     def _on_refresh(self) -> None:
         """Recarga la lista de perfiles desde la BD."""
         self._loaded = False
-        asyncio.ensure_future(self._load_data())
+        task = asyncio.ensure_future(self._load_data())
+        task.add_done_callback(self._on_task_done)
 
     async def _do_delete(self, profile_id: int) -> None:
         """Elimina el perfil del índice y recarga la tabla."""
@@ -338,7 +349,8 @@ class ProfilesView(QWidget):
             QMessageBox.StandardButton.Cancel,
         )
         if reply == QMessageBox.StandardButton.Yes:
-            asyncio.ensure_future(self._do_delete(profile_id))
+            task = asyncio.ensure_future(self._do_delete(profile_id))
+            task.add_done_callback(self._on_task_done)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────

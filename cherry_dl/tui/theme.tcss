@@ -1,0 +1,521 @@
+/* ── Cherry-DL TUI Theme ──────────────────────────────────────────────────── */
+/*
+   Paleta:
+     Fondo profundo   #0f0f1a
+     Fondo panel      #1a1a2e
+     Fondo elemento   #16213e
+     Acento cherry    #e75480
+     Acento hover     #ff6b9d
+     Texto principal  #e0e0e0
+     Texto secundario #888888
+     Borde            #2a2a42
+*/
+
+/* ── App base ──────────────────────────────────────────────────────────────── */
+
+App {
+    background: #0f0f1a;
+    color: #e0e0e0;
+}
+
+Header {
+    background: #1a1a2e;
+    color: #e75480;
+    text-style: bold;
+    border-bottom: solid #e75480;
+}
+
+Footer {
+    background: #12121e;
+    color: #555577;
+    border-top: solid #1e1e30;
+}
+
+/* ── Pantallas ─────────────────────────────────────────────────────────────── */
+
+Screen {
+    background: #0f0f1a;
+    layout: vertical;
+}
+
+/* ── Botones ───────────────────────────────────────────────────────────────── */
+
+Button {
+    background: #1a1a2e;
+    color: #c0c0d8;
+    border: tall #2a2a42;
+    min-width: 14;
+}
+
+Button:hover {
+    background: #22223a;
+    border: tall #e75480;
+    color: #e0e0e0;
+}
+
+Button:focus {
+    border: tall #e75480;
+}
+
+Button.-primary {
+    background: #e75480;
+    color: #ffffff;
+    text-style: bold;
+    border: tall #e75480;
+}
+
+Button.-primary:hover {
+    background: #ff6b9d;
+    border: tall #ff6b9d;
+}
+
+Button.-danger {
+    background: #1a1a2e;
+    color: #e75480;
+    border: tall #3a1a2e;
+}
+
+Button.-danger:hover {
+    background: #e75480;
+    color: #ffffff;
+    border: tall #e75480;
+}
+
+Button:disabled {
+    background: #0d0d18;
+    color: #2a2a44;
+    border: tall #161628;
+}
+
+/* ── Inputs ────────────────────────────────────────────────────────────────── */
+
+Input {
+    background: #13132a;
+    border: tall #2a2a42;
+    color: #e0e0e0;
+}
+
+Input:focus {
+    border: tall #e75480;
+    background: #1a1a2e;
+}
+
+Input.-invalid {
+    border: tall #ff4444;
+}
+
+/* ── DataTable ─────────────────────────────────────────────────────────────── */
+
+DataTable {
+    background: #0d0d1e;
+    border: solid #2a2a42;
+    scrollbar-color: #2a2a42;
+    scrollbar-color-hover: #e75480;
+}
+
+DataTable > .datatable--header {
+    background: #1a1a2e;
+    color: #7777aa;
+    text-style: bold;
+}
+
+DataTable > .datatable--cursor {
+    background: #e75480;
+    color: #ffffff;
+}
+
+DataTable > .datatable--even-row {
+    background: #0d0d1e;
+}
+
+DataTable > .datatable--odd-row {
+    background: #10102a;
+}
+
+DataTable > .datatable--hover {
+    background: #1a1a38;
+}
+
+/* ── RichLog ───────────────────────────────────────────────────────────────── */
+
+RichLog {
+    background: #0a0a16;
+    border: solid #1e1e36;
+    scrollbar-color: #2a2a42;
+    scrollbar-color-hover: #e75480;
+    padding: 0 1;
+}
+
+/* ── ProgressBar ───────────────────────────────────────────────────────────── */
+
+ProgressBar {
+    width: 100%;
+}
+
+ProgressBar > .bar--bar {
+    color: #e75480;
+}
+
+ProgressBar > .bar--complete {
+    color: #44aaff;
+}
+
+ProgressBar > .bar--indeterminate {
+    color: #e75480;
+}
+
+/* ── Labels especiales ─────────────────────────────────────────────────────── */
+
+.section-label {
+    background: #13132a;
+    color: #e75480;
+    text-style: bold;
+    padding: 0 2;
+    height: 1;
+    border-left: heavy #e75480;
+    width: 100%;
+}
+
+.cherry-accent {
+    color: #e75480;
+    text-style: bold;
+}
+
+.dim {
+    color: #555577;
+}
+
+/* ── Estado del semáforo ───────────────────────────────────────────────────── */
+
+.status-idle    { color: #555577; }
+.status-running { color: #00cc66; text-style: bold; }
+.status-done    { color: #44aaff; text-style: bold; }
+.status-error   { color: #ff4444; text-style: bold; }
+.status-cancel  { color: #ffaa00; text-style: bold; }
+
+/* ── Separadores ───────────────────────────────────────────────────────────── */
+
+Rule {
+    color: #2a2a42;
+}
+
+/* ── ProfilesScreen ────────────────────────────────────────────────────────── */
+
+#profiles-toolbar {
+    height: 3;
+    layout: horizontal;
+    align: left middle;
+    padding: 0 1;
+    background: #0d0d18;
+    border-bottom: solid #1e1e30;
+}
+
+#profiles-toolbar Button {
+    margin-right: 1;
+    min-width: 14;
+}
+
+#profiles-table {
+    height: 1fr;
+    border: solid #2a2a42;
+}
+
+/* ── ArtistScreen — cabecera del perfil ────────────────────────────────────── */
+
+#profile-header {
+    height: 2;
+    padding: 0 2;
+    background: #13132a;
+    border-bottom: solid #2a2a42;
+    align: left middle;
+}
+
+#profile-name {
+    width: auto;
+    padding-right: 2;
+}
+
+#profile-meta {
+    color: #666688;
+    width: 1fr;
+    content-align: left middle;
+}
+
+/* ── ArtistScreen — tabla de fuentes ──────────────────────────────────────── */
+
+#sources-table {
+    height: 8;
+    border: solid #2a2a42;
+}
+
+#source-buttons {
+    height: 3;
+    layout: horizontal;
+    align: left middle;
+    padding: 0 1;
+    background: #0d0d1a;
+    border-bottom: solid #1e1e30;
+}
+
+#source-buttons Button {
+    min-width: 12;
+    margin-right: 1;
+}
+
+/* ── ArtistScreen — controles ─────────────────────────────────────────────── */
+
+#controls-row {
+    height: 3;
+    layout: horizontal;
+    padding: 0 1;
+    align: left middle;
+    background: #0f0f1e;
+    border-bottom: solid #1e1e30;
+}
+
+#controls-row Label {
+    width: auto;
+    padding: 0 1;
+    color: #7777aa;
+    content-align: left middle;
+}
+
+#workers-input {
+    width: 10;
+}
+
+#ext-filter-input {
+    width: 24;
+}
+
+#prescan-input {
+    width: 1fr;
+}
+
+#actions-row {
+    height: 3;
+    layout: horizontal;
+    align: right middle;
+    padding: 0 1;
+    background: #0d0d18;
+    border-bottom: solid #1e1e30;
+}
+
+#actions-row Button {
+    margin: 0 1;
+    min-width: 14;
+}
+
+/* ── ArtistScreen — panel de workers ──────────────────────────────────────── */
+
+#workers-panel {
+    height: auto;
+    max-height: 10;
+    border: solid #1e1e36;
+    background: #090912;
+    overflow-y: auto;
+}
+
+/* ── ArtistScreen — log de actividad ──────────────────────────────────────── */
+
+#activity-log {
+    height: 1fr;
+    min-height: 6;
+    border: solid #1e1e36;
+}
+
+/* ── ArtistScreen — barra de estado (SIEMPRE VISIBLE) ─────────────────────── */
+
+#status-bar {
+    dock: bottom;
+    height: 1;
+    background: #0d0d1a;
+    border-top: solid #2a2a42;
+    padding: 0 2;
+    layout: horizontal;
+    align: left middle;
+}
+
+#semaphore {
+    width: auto;
+    padding-right: 2;
+}
+
+#counters-label {
+    dock: right;
+    width: auto;
+    color: #555577;
+    content-align: right middle;
+}
+
+/* ── WorkerRow ─────────────────────────────────────────────────────────────── */
+
+WorkerRow {
+    height: 2;
+    layout: horizontal;
+    padding: 0 1;
+    background: #090912;
+    border-bottom: solid #13132a;
+}
+
+WorkerRow > .wid {
+    width: 4;
+    color: #444466;
+    content-align: center middle;
+}
+
+WorkerRow > .wstatus {
+    width: 3;
+    content-align: center middle;
+    color: #e75480;
+}
+
+WorkerRow > .wfile {
+    width: 1fr;
+    color: #7777aa;
+    content-align: left middle;
+    overflow: hidden;
+}
+
+WorkerRow > .wprog {
+    width: 18;
+    content-align: center middle;
+}
+
+WorkerRow > .wspeed {
+    width: 12;
+    color: #555577;
+    content-align: right middle;
+}
+
+/* ── Menú contextual ───────────────────────────────────────────────────────── */
+
+InputContextMenu {
+    align: center middle;
+}
+
+#ctx-menu {
+    width: 28;
+    height: auto;
+    background: #1a1a2e;
+    border: solid #e75480;
+    padding: 0;
+}
+
+#ctx-menu Button {
+    width: 100%;
+    height: 2;
+    min-width: 0;
+    background: #1a1a2e;
+    color: #c0c0d8;
+    border: none;
+    content-align: left middle;
+    padding: 0 2;
+}
+
+#ctx-menu Button:hover {
+    background: #e75480;
+    color: #ffffff;
+    border: none;
+}
+
+#ctx-menu Button:focus {
+    background: #c04060;
+    color: #ffffff;
+    border: none;
+}
+
+/* ── Modales ───────────────────────────────────────────────────────────────── */
+
+NewProfileModal, AddUrlModal {
+    align: center middle;
+}
+
+#modal-card {
+    width: 82;
+    height: auto;
+    background: #1a1a2e;
+    border: double #e75480;
+    padding: 2 3;
+}
+
+.modal-field-label {
+    color: #7777aa;
+    margin-top: 1;
+    margin-bottom: 0;
+}
+
+.modal-input-row {
+    height: 3;
+    layout: horizontal;
+    margin-bottom: 0;
+}
+
+.modal-input-row Input {
+    width: 1fr;
+}
+
+.btn-small {
+    min-width: 12;
+    margin-left: 1;
+}
+
+.modal-status {
+    height: 1;
+    color: #555577;
+    margin-bottom: 1;
+    padding-left: 1;
+}
+
+.modal-options-row {
+    height: 3;
+    layout: horizontal;
+    align: left middle;
+    margin-top: 1;
+}
+
+.modal-opt-label {
+    width: auto;
+    padding-right: 1;
+    color: #7777aa;
+    content-align: left middle;
+}
+
+.modal-opt-input {
+    width: 8;
+}
+
+.modal-opt-filter {
+    width: 1fr;
+    margin-left: 1;
+}
+
+#modal-buttons {
+    layout: horizontal;
+    align: right middle;
+    margin-top: 2;
+}
+
+#modal-buttons Button {
+    margin-left: 1;
+}
+
+/* ── SettingsScreen ────────────────────────────────────────────────────────── */
+
+#settings-grid {
+    layout: grid;
+    grid-size: 2;
+    grid-columns: 1fr 1fr;
+    padding: 1 2;
+    height: 1fr;
+}
+
+.setting-row {
+    height: 5;
+    padding: 0 1;
+}
+
+.setting-row Label {
+    color: #7777aa;
+    margin-bottom: 0;
+}

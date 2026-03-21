@@ -610,38 +610,69 @@ async def update_async(
 
 async def _build_local_hash_map(artist_dir: Path) -> dict[str, Path]:
     """
-    Hashea todos los archivos de medios existentes en artist_dir.
-    Retorna {sha256: path} para detectar archivos con nombres incorrectos.
-    Se ejecuta en un executor para no bloquear el event loop.
+    Retorna {sha256: path} sólo para archivos de medios que existen
+    físicamente en artist_dir pero NO están registrados en catalog.db.
 
-    Limpia archivos .tmp huérfanos (escrituras interrumpidas por crash).
+    Flujo rápido:
+      1. Leer catalog.db para obtener {filename: hash} de archivos indexados
+         → sin acceso a disco, sólo una query SQL.
+      2. Filtrar archivos físicos: sólo los que no están en el catálogo
+         necesitan ser hasheados.
+      3. Hashear los restantes en paralelo con run_in_executor.
+
+    Para colecciones establecidas (todo catalogado) esto es casi instantáneo.
+    Para importaciones iniciales (carpeta sin catalog.db) hashea en paralelo.
+
+    También limpia archivos .tmp huérfanos de sesiones interrumpidas.
     """
+    from ..catalog import get_all_files
     from ..hasher import sha256_file
 
-    # Eliminar .tmp huérfanos de sesiones anteriores que se interrumpieron
-    for tmp in artist_dir.iterdir():
-        if tmp.is_file() and tmp.name.endswith(".tmp"):
-            try:
-                tmp.unlink()
-            except OSError:
-                pass
-
-    files = [
-        f for f in artist_dir.iterdir()
-        if f.is_file() and f.suffix.lower() in _MEDIA_EXTENSIONS
-    ]
-    if not files:
+    # Eliminar .tmp huérfanos de sesiones anteriores
+    try:
+        for tmp in artist_dir.iterdir():
+            if tmp.is_file() and tmp.name.endswith(".tmp"):
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+    except OSError:
         return {}
 
+    # Paso 1: hashes ya conocidos por el catálogo (sin leer disco)
+    try:
+        cataloged: dict[str, str] = {
+            e["filename"]: e["hash"]
+            for e in await get_all_files(artist_dir)
+        }
+    except Exception:
+        cataloged = {}
+
+    # Paso 2: archivos físicos que NO están en el catálogo
+    try:
+        physical = [
+            f for f in artist_dir.iterdir()
+            if f.is_file() and f.suffix.lower() in _MEDIA_EXTENSIONS
+        ]
+    except OSError:
+        return {}
+
+    uncataloged = [f for f in physical if f.name not in cataloged]
+    if not uncataloged:
+        return {}
+
+    # Paso 3: hashear en paralelo sólo los no catalogados
     loop = asyncio.get_event_loop()
-    result: dict[str, Path] = {}
-    for f in files:
+
+    async def _hash_one(f: Path) -> tuple[str | None, Path]:
         try:
             h = await loop.run_in_executor(None, sha256_file, f)
-            result[h] = f
+            return h, f
         except Exception:
-            pass  # archivo inaccesible, ignorar
-    return result
+            return None, f
+
+    pairs = await asyncio.gather(*(_hash_one(f) for f in uncataloged))
+    return {h: f for h, f in pairs if h is not None}
 
 
 async def load_collections_async(config) -> list[dict]:
