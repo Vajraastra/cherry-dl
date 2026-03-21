@@ -204,14 +204,43 @@ class AddUrlModal(ModalScreen[str | None]):
             yield Rule()
             yield Label("URL del artista:")
             yield Input(placeholder="https://kemono.cr/patreon/user/...", id="url-input")
+            yield Label("", id="url-status")
             with Horizontal(id="modal-buttons"):
                 yield Button("Cancelar", variant="default", id="btn-cancel")
                 yield Button("Agregar", variant="primary", id="btn-confirm", classes="-primary")
 
+    def on_input_changed(self, event: Input.Changed) -> None:
+        from ..templates._registry import find_template
+        url = event.value.strip()
+        lbl = self.query_one("#url-status", Label)
+        if not url:
+            lbl.update("")
+            return
+        cls = find_template(url)
+        if cls:
+            if cls.provides_file_hashes:
+                lbl.update(f"[green]✓ Template: {cls.name}[/]")
+            else:
+                lbl.update(
+                    f"[green]✓ Template: {cls.name}[/]  "
+                    f"[yellow]⚠ Este sitio no expone hashes — el primer scan "
+                    f"descargará todo para deduplicar por hash local.[/]"
+                )
+        else:
+            lbl.update("[red]✗ No hay template para este sitio[/]")
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-confirm":
+            from ..templates._registry import find_template
             url = self.query_one("#url-input", Input).value.strip()
-            self.dismiss(url if url else None)
+            if not url:
+                return
+            if not find_template(url):
+                self.query_one("#url-status", Label).update(
+                    "[red]✗ No hay template para este sitio — URL no agregada[/]"
+                )
+                return
+            self.dismiss(url)
         else:
             self.dismiss(None)
 
@@ -292,6 +321,7 @@ class NewProfileModal(ModalScreen[dict | None]):
     # ── Workers ──────────────────────────────────────────────────────────────
 
     async def _resolve_url(self) -> None:
+        from ..auth.patreon import NeedsManualAuth
         from ..engine import DownloadEngine
         from ..templates._registry import get_template
 
@@ -307,17 +337,21 @@ class NewProfileModal(ModalScreen[dict | None]):
                     lbl.update("[red]✗ Sin template para esta URL[/]")
                     return
                 self._artist_info = await tmpl.get_artist_info(url)
-                self._site        = tmpl.name
+                self._site = tmpl.name
                 lbl.update(
                     f"[green]✓ {tmpl.name.upper()} · "
                     f"{self._artist_info.name} · "
                     f"ID: {self._artist_info.artist_id}[/]"
                 )
-            # Auto-rellenar nombre si está vacío
             name_inp = self.query_one("#inp-name", Input)
             if not name_inp.value.strip():
                 name_inp.value = self._artist_info.name
             self._auto_folder()
+        except NeedsManualAuth:
+            lbl.update("[yellow]⚠ Se requiere autenticación con Patreon[/]")
+            ok = await self.app.push_screen_wait(PatreonAuthModal())
+            if ok:
+                await self._resolve_url()
         except Exception as exc:
             lbl.update(f"[red]✗ Error: {exc}[/]")
 
@@ -357,6 +391,95 @@ class NewProfileModal(ModalScreen[dict | None]):
             "ext_filter": ext_filter,
             "download":   download,
         })
+
+
+# ── PatreonAuthModal ────────────────────────────────────────────────────────
+
+class PatreonAuthModal(ModalScreen):
+    """
+    Modal de autenticación de Patreon.
+
+    Flujo:
+      1. Botón "Abrir Patreon" → webbrowser.open() en el browser del sistema
+      2. Usuario inicia sesión en su browser normal
+      3. Botón "Ya inicié sesión" → browser_cookie3 lee las cookies
+      4. Si encuentra session_id → guarda en session.json → dismiss(True)
+      5. Si no → muestra error y permite reintentar
+    """
+
+    DEFAULT_CSS = """
+    PatreonAuthModal {
+        align: center middle;
+    }
+    PatreonAuthModal > Vertical {
+        width: 62;
+        height: auto;
+        padding: 1 2;
+        background: $surface;
+        border: solid $primary;
+    }
+    PatreonAuthModal #lbl-status {
+        height: 1;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Label("[bold]Autenticación de Patreon[/]")
+            yield Rule()
+            yield Label(
+                "No se detectó sesión activa de Patreon en tu navegador.\n"
+            )
+            yield Label("Paso 1 — Abre Patreon e inicia sesión:")
+            yield Button(
+                "🌐  Abrir patreon.com/login",
+                id="btn-open-browser",
+                variant="primary",
+            )
+            yield Label("")
+            yield Label("Paso 2 — Vuelve aquí y confirma:")
+            yield Button(
+                "✓  Ya inicié sesión",
+                id="btn-check",
+                variant="success",
+            )
+            yield Label("", id="lbl-status")
+            yield Rule()
+            yield Button("Cancelar", id="btn-cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        match event.button.id:
+            case "btn-open-browser":
+                import webbrowser
+                webbrowser.open("https://www.patreon.com/login")
+            case "btn-check":
+                self.run_worker(
+                    self._try_cookies(), exclusive=True, group="auth"
+                )
+            case "btn-cancel":
+                self.dismiss(False)
+
+    async def _try_cookies(self) -> None:
+        """Busca cookies en el browser tras el login del usuario."""
+        import asyncio
+        from ..auth.patreon import load_from_browser, save_patreon_cookies
+
+        lbl = self.query_one("#lbl-status", Label)
+        lbl.update("[yellow]Buscando sesión en el navegador…[/]")
+
+        # browser_cookie3 es síncrono — ejecutar en thread
+        cookies = await asyncio.to_thread(load_from_browser)
+
+        if cookies:
+            save_patreon_cookies(cookies)
+            lbl.update("[green]✓ Sesión detectada correctamente[/]")
+            await asyncio.sleep(0.8)
+            self.dismiss(True)
+        else:
+            lbl.update(
+                "[red]✗ No se encontró sesión. "
+                "¿Completaste el login en el navegador?[/]"
+            )
 
 
 # ── ProfilesScreen ──────────────────────────────────────────────────────────
@@ -703,10 +826,6 @@ class ArtistScreen(Screen):
 
     async def _del_url_async(self, row_idx: int) -> None:
         tbl = self.query_one("#sources-table", DataTable)
-        row = tbl.get_row_at(row_idx)
-        # la key de la fila es el url_id
-        url_id = int(tbl.get_row_index(tbl.cursor_coordinate.row) or 0)
-        # Obtener key directamente
         keys = list(tbl.rows.keys())
         if row_idx >= len(keys):
             return
@@ -819,7 +938,8 @@ class ArtistScreen(Screen):
             get_or_create_site,
             update_profile_url_sync,
         )
-        from ..templates._registry import get_template
+        from ..auth.patreon import NeedsManualAuth
+        from ..templates._registry import find_template, get_template
 
         profile = self._profile
         if not profile:
@@ -831,6 +951,13 @@ class ArtistScreen(Screen):
         except ValueError:
             workers = 3
         ext_filter = _parse_ext_filter(self.query_one("#ext-filter-input", Input).value)
+
+        # Respetar max_workers del template más restrictivo en el perfil
+        for pu in profile.get("urls", []):
+            if pu.get("enabled") and pu.get("url"):
+                cls = find_template(pu["url"])
+                if cls and getattr(cls, "max_workers", None):
+                    workers = min(workers, cls.max_workers)
 
         # Reinicializar panel de workers con el número correcto
         self._init_worker_panel(workers)
@@ -852,7 +979,21 @@ class ArtistScreen(Screen):
                     self._log(f"[red]✗ Sin template para: {pu['url']}[/]")
                     continue
 
-                artist_info = await template.get_artist_info(pu["url"])
+                try:
+                    artist_info = await template.get_artist_info(pu["url"])
+                except NeedsManualAuth:
+                    self._log("[yellow]⚠ Patreon requiere autenticación[/]")
+                    ok = await self.app.push_screen_wait(PatreonAuthModal())
+                    if not ok:
+                        self._log("[red]✗ Autenticación cancelada[/]")
+                        continue
+                    try:
+                        artist_info = await template.get_artist_info(
+                            pu["url"]
+                        )
+                    except Exception as exc:
+                        self._log(f"[red]✗ Error tras auth: {exc}[/]")
+                        continue
                 self._log(f"[bold]▶ {artist_info.name} ({pu['site']})[/]")
 
                 folder.mkdir(parents=True, exist_ok=True)
@@ -917,7 +1058,7 @@ class ArtistScreen(Screen):
                             in_progress_hashes.add(fi.remote_hash)
 
                         try:
-                            if await url_exists(folder, fi.url):
+                            if await url_exists(folder, fi.dedup_key):
                                 skipped_ref[0] += 1
                                 self._log(f"  [dim]— {fi.filename[:60]}  [URL en catálogo][/]")
                                 self._update_counters(
@@ -995,6 +1136,23 @@ class ArtistScreen(Screen):
                                     result.dest.unlink()
                                 continue
 
+                            # Dedup post-descarga: mismo contenido ya catalogado
+                            # (ej. archivo de Patreon que ya existía vía Kemono)
+                            if await hash_exists(folder, result.file_hash):
+                                skipped_ref[0] += 1
+                                if result.dest and result.dest.exists():
+                                    result.dest.unlink()
+                                if slot_id < len(self._worker_rows):
+                                    self._worker_rows[slot_id].idle()
+                                self._log(
+                                    f"  [dim]≡ {fi.filename[:60]}  [duplicado — hash ya catalogado][/]"
+                                )
+                                self._update_counters(
+                                    downloaded_ref[0], skipped_ref[0],
+                                    errors_ref[0], deferred_count_ref[0],
+                                )
+                                continue
+
                             # Catalogar
                             if result.file_hash in local_hashes:
                                 old_path = local_hashes[result.file_hash]
@@ -1016,7 +1174,7 @@ class ArtistScreen(Screen):
                                     artist_dir=folder,
                                     file_hash=result.file_hash,
                                     filename=final_name,
-                                    url_source=fi.url,
+                                    url_source=fi.dedup_key,
                                     file_size=result.file_size,
                                     counter=counter,
                                 )
@@ -1035,7 +1193,7 @@ class ArtistScreen(Screen):
                                     artist_dir=folder,
                                     file_hash=result.file_hash,
                                     filename=final_name,
-                                    url_source=fi.url,
+                                    url_source=fi.dedup_key,
                                     file_size=result.file_size,
                                     counter=counter,
                                 )
@@ -1095,7 +1253,7 @@ class ArtistScreen(Screen):
             if deferred:
                 self._log(f"\n[yellow]⏭ Cola diferida: {len(deferred)} archivo(s)…[/]")
                 for file_info, a_info, dest_folder in deferred:
-                    if await url_exists(dest_folder, file_info.url):
+                    if await url_exists(dest_folder, file_info.dedup_key):
                         skipped_ref[0] += 1
                         continue
                     counter    = await next_counter(dest_folder)
@@ -1110,7 +1268,7 @@ class ArtistScreen(Screen):
                             artist_dir=dest_folder,
                             file_hash=result.file_hash,
                             filename=final_name,
-                            url_source=file_info.url,
+                            url_source=file_info.dedup_key,
                             file_size=result.file_size,
                             counter=counter,
                         )
@@ -1182,7 +1340,7 @@ class ArtistScreen(Screen):
                 async for file_info in template.iter_files(artist_info):
                     if file_info.remote_hash and await hash_exists(folder, file_info.remote_hash):
                         continue
-                    if await url_exists(folder, file_info.url):
+                    if await url_exists(folder, file_info.dedup_key):
                         continue
                     count_new += 1
                     self._update_counters(total_new + count_new, 0, 0, 0)

@@ -48,7 +48,8 @@ _PAGE_SIZE = 50  # Kemono retorna 50 posts por página
 class KemonoTemplate(SiteTemplate):
     name = "kemono"
     base_url = _BASE
-    workers = 3  # Conservador — kemono tiene rate limits agresivos
+    workers = 3                  # Conservador — kemono tiene rate limits agresivos
+    provides_file_hashes = True  # Kemono expone SHA-256 en el path del CDN
 
     # ── Detección ──────────────────────────────────────────────────────────────
 
