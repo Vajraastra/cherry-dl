@@ -153,7 +153,12 @@ class DownloadEngine:
         self._workers = workers or config.workers
         self._semaphore = asyncio.Semaphore(self._workers)
         self._client: httpx.AsyncClient | None = None
-        self._session_cookies: dict[str, str] = load_session()
+        # Solo cookies planas (strings) — los bloques de servicios como
+        # {"pixiv": {...}} son dicts anidados y no son cookies HTTP.
+        raw = load_session()
+        self._session_cookies: dict[str, str] = {
+            k: v for k, v in raw.items() if isinstance(v, str)
+        }
 
     async def __aenter__(self) -> "DownloadEngine":
         # Timeout de conexión y escritura = config.timeout (corto, 30 s).
@@ -214,17 +219,21 @@ class DownloadEngine:
         progress: Progress | None = None,
         task_id: TaskID | None = None,
         on_progress: Callable[[int, int], None] | None = None,
+        extra_headers: dict | None = None,
     ) -> DownloadResult:
         """
         Descarga un archivo al directorio destino.
         Respeta el semáforo del pool (max N descargas simultáneas).
         Retorna DownloadResult con hash SHA-256 y tamaño.
 
-        on_progress: callback(bytes_done, total_bytes) invocado en cada chunk.
+        on_progress:    callback(bytes_done, total_bytes) por chunk.
+        extra_headers:  headers adicionales por archivo (ej. Referer de Pixiv).
+                        Se fusionan con los headers base del cliente.
         """
         async with self._semaphore:
             return await self._do_download(
-                url, dest_dir, filename, progress, task_id, on_progress
+                url, dest_dir, filename, progress, task_id,
+                on_progress, extra_headers,
             )
 
     async def run_queue(
@@ -341,6 +350,7 @@ class DownloadEngine:
         progress: Progress | None,
         task_id: TaskID | None,
         on_progress: Callable[[int, int], None] | None = None,
+        extra_headers: dict | None = None,
     ) -> DownloadResult:
         """
         Descarga un archivo con retry clasificado por tipo de error.
@@ -362,7 +372,9 @@ class DownloadEngine:
                 chunks: list[bytes] = []
                 total = 0
 
-                async with self._client.stream("GET", url) as resp:
+                async with self._client.stream(
+                    "GET", url, headers=extra_headers or {}
+                ) as resp:
                     code = resp.status_code
 
                     # ── Errores permanentes: no reintentar ─────────────────

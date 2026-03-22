@@ -82,7 +82,7 @@ async def organize(
     result = OrganizeResult()
 
     # Directorio destino del artista
-    artist_dir = dest_root / site / _safe_dirname(artist_name or artist_id)
+    artist_dir = dest_root / _safe_dirname(artist_name or artist_id)
     artist_dir.mkdir(parents=True, exist_ok=True)
 
     # Inicializar catalog.db si no existe

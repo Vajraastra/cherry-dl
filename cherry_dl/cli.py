@@ -86,7 +86,7 @@ async def _download(url: str, workers: int | None, prescan: str | None = None) -
         console.print(f"  Artista: [bold]{artist.name}[/bold] ({artist.service})")
 
         # Directorio destino
-        artist_dir = config.download_path / artist.site / _safe_dirname(artist.name)
+        artist_dir = config.download_path / _safe_dirname(artist.name)
         artist_dir.mkdir(parents=True, exist_ok=True)
         console.print(f"  Destino: [dim]{artist_dir}[/dim]")
 
@@ -368,6 +368,242 @@ def config_set(
     except ValueError as e:
         console.print(f"[red]✗ {e}[/red]")
         raise typer.Exit(1)
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# MIGRATE-STRUCTURE
+# ════════════════════════════════════════════════════════════════════════════════
+
+@app.command()
+def migrate_structure(
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Muestra el plan sin ejecutar nada"
+    ),
+):
+    """Migra carpetas al esquema artist-first: {download_dir}/{artista}/."""
+    run(_migrate_structure(dry_run))
+
+
+async def _migrate_structure(dry_run: bool) -> None:
+    import shutil
+    import aiosqlite
+    from .config import load_config, ensure_dirs, INDEX_DB
+    from .index import init_index, list_profiles
+
+    config = load_config()
+    ensure_dirs(config)
+    await init_index(INDEX_DB)
+
+    profiles = await list_profiles(INDEX_DB)
+    if not profiles:
+        console.print("[yellow]No hay perfiles en el índice.[/yellow]")
+        return
+
+    # Calcular plan: solo perfiles cuya ruta actual ≠ ruta nueva
+    plan = []
+    for p in profiles:
+        old_path = Path(p["folder_path"])
+        new_path = config.download_path / _safe_dirname(p["display_name"])
+        if old_path == new_path:
+            continue
+        plan.append({
+            "id": p["id"], "name": p["display_name"],
+            "old": old_path, "new": new_path,
+        })
+
+    if not plan:
+        console.print(
+            "[green]✓ Todos los perfiles ya usan la estructura nueva.[/]"
+        )
+        return
+
+    # Mostrar plan en tabla
+    table = Table(title="Plan de migración", show_lines=True)
+    table.add_column("Perfil", style="bold")
+    table.add_column("Ruta actual", style="dim", overflow="fold")
+    table.add_column("Ruta nueva", style="cyan", overflow="fold")
+    table.add_column("Disco")
+    for item in plan:
+        disk_status = (
+            "[green]existe[/]"
+            if item["old"].exists()
+            else "[yellow]no en disco[/]"
+        )
+        table.add_row(
+            item["name"], str(item["old"]), str(item["new"]), disk_status
+        )
+    console.print(table)
+
+    if dry_run:
+        console.print(
+            "\n[yellow]Modo --dry-run: no se realizó ningún cambio.[/]"
+        )
+        return
+
+    console.print(
+        f"\n[bold yellow]⚠ Se moverán {len(plan)} carpetas en disco "
+        f"y se actualizará el índice.[/bold yellow]"
+    )
+    if not typer.confirm("¿Continuar?", default=False):
+        console.print("Cancelado.")
+        return
+
+    # Ejecutar migración
+    migrated = errors = only_db = 0
+    async with aiosqlite.connect(INDEX_DB) as db:
+        for item in plan:
+            old_path: Path = item["old"]
+            new_path: Path = item["new"]
+            try:
+                if old_path.exists():
+                    if new_path.exists():
+                        console.print(
+                            f"[red]  ✗ Conflicto:[/] {new_path} ya existe"
+                            f" — saltando [bold]{item['name']}[/]"
+                        )
+                        errors += 1
+                        continue
+                    shutil.move(str(old_path), str(new_path))
+                    console.print(f"  [green]↦[/green] {item['name']}")
+                else:
+                    console.print(
+                        f"  [yellow]⚠ Solo DB[/] {item['name']}"
+                        " (carpeta no existe en disco)"
+                    )
+                    only_db += 1
+
+                # Actualizar profiles
+                await db.execute(
+                    "UPDATE profiles SET folder_path = ? WHERE id = ?",
+                    (str(new_path), item["id"]),
+                )
+                # Actualizar artists (todos los que apuntan a la carpeta vieja)
+                await db.execute(
+                    "UPDATE artists SET folder_path = ? WHERE folder_path = ?",
+                    (str(new_path), str(old_path)),
+                )
+                migrated += 1
+            except Exception as e:
+                console.print(f"[red]  ✗ Error en {item['name']}:[/red] {e}")
+                errors += 1
+
+        await db.commit()
+
+    console.print()
+    console.print("[bold green]✓ Migración completa[/]")
+    console.print(f"  Migrados: [green]{migrated}[/]")
+    if only_db:
+        console.print(f"  Solo índice (sin archivos): [yellow]{only_db}[/]")
+    if errors:
+        console.print(f"  Errores: [red]{errors}[/red]")
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# COMPACT
+# ════════════════════════════════════════════════════════════════════════════════
+
+@app.command()
+def compact(
+    profile: str = typer.Argument(
+        ..., help="Nombre o ID del perfil a compactar"
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Muestra el plan sin ejecutar nada"
+    ),
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="Omite la confirmación interactiva"
+    ),
+):
+    """Compacta la numeración de archivos, eliminando huecos."""
+    run(_compact(profile, dry_run, yes))
+
+
+async def _compact(
+    profile_id_or_name: str, dry_run: bool, yes: bool
+) -> None:
+    from .config import load_config, ensure_dirs, INDEX_DB
+    from .index import init_index, list_profiles
+    from .catalog import (
+        get_numbered_files, plan_compaction, apply_compaction,
+    )
+
+    config = load_config()
+    ensure_dirs(config)
+    await init_index(INDEX_DB)
+
+    # Buscar perfil por ID o nombre
+    profiles = await list_profiles(INDEX_DB)
+    matched = next(
+        (
+            p for p in profiles
+            if str(p["id"]) == profile_id_or_name
+            or p["display_name"] == profile_id_or_name
+        ),
+        None,
+    )
+    if matched is None:
+        console.print(f"[red]✗ Perfil no encontrado:[/] {profile_id_or_name}")
+        console.print(
+            "  Usa [bold]cherry-dl status[/bold] para ver perfiles."
+        )
+        raise typer.Exit(1)
+
+    folder = Path(matched["folder_path"])
+    if not folder.exists():
+        console.print(f"[red]✗ Carpeta no encontrada:[/] {folder}")
+        raise typer.Exit(1)
+
+    files = await get_numbered_files(folder)
+    if not files:
+        console.print("[yellow]No hay archivos numerados en el catálogo.[/]")
+        return
+
+    plan = plan_compaction(files)
+    if not plan:
+        console.print(
+            f"[green]✓ Numeración ya es continua "
+            f"({len(files)} archivos).[/]"
+        )
+        return
+
+    console.print(
+        f"Perfil: [bold]{matched['display_name']}[/bold]"
+        f"  |  Carpeta: [dim]{folder}[/dim]"
+    )
+    console.print(
+        f"Total archivos: [cyan]{len(files)}[/]"
+        f"  |  A renombrar: [yellow]{len(plan)}[/]"
+    )
+
+    if dry_run:
+        table = Table(title="Plan de compactación", show_lines=False)
+        table.add_column("Antes", style="dim")
+        table.add_column("Después", style="cyan")
+        limit = 20
+        for old_name, new_name, *_ in plan[:limit]:
+            table.add_row(old_name, new_name)
+        if len(plan) > limit:
+            table.add_row("...", f"(+{len(plan) - limit} más)")
+        console.print(table)
+        console.print(
+            "\n[yellow]Modo --dry-run: no se realizó ningún cambio.[/]"
+        )
+        return
+
+    if not yes:
+        console.print(
+            f"\n[bold yellow]⚠ Se renombrarán {len(plan)} archivos en disco.[/]"
+        )
+        console.print("  Los archivos en el catálogo se actualizarán.")
+        if not typer.confirm("¿Continuar?", default=False):
+            console.print("Cancelado.")
+            return
+
+    await apply_compaction(folder, plan, len(files))
+    console.print(
+        f"[bold green]✓ Compactación completa[/] — "
+        f"{len(plan)} archivos renombrados"
+    )
 
 
 # ════════════════════════════════════════════════════════════════════════════════

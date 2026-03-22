@@ -188,6 +188,135 @@ async def remove_file(artist_dir: Path, file_hash: str) -> None:
         await db.commit()
 
 
+async def get_numbered_files(
+    artist_dir: Path,
+) -> list[tuple[int, str, str]]:
+    """
+    Retorna archivos numerados que existen en disco.
+
+    Resultado: lista de (counter, filename, hash) ordenada por el
+    contador extraído del nombre del archivo (no del campo counter en DB,
+    que puede estar desactualizado).
+
+    Solo incluye archivos presentes físicamente en la carpeta —
+    los archivos purgados quedan en el catálogo pero se omiten aquí.
+    """
+    import re as _re
+    db_path = artist_dir / CATALOG_NAME
+    if not db_path.exists():
+        return []
+    async with aiosqlite.connect(db_path) as db:
+        async with db.execute(
+            "SELECT filename, hash FROM files WHERE counter IS NOT NULL"
+        ) as cur:
+            rows = await cur.fetchall()
+
+    result = []
+    for filename, file_hash in rows:
+        if not (artist_dir / filename).exists():
+            continue
+        m = _re.search(r'_(\d{5})\.[^.]*$', filename)
+        if m:
+            result.append((int(m.group(1)), filename, file_hash))
+
+    result.sort(key=lambda x: x[0])
+    return result
+
+
+def plan_compaction(
+    files: list[tuple[int, str, str]],
+) -> list[tuple[str, str, str, int]]:
+    """
+    Calcula los renombres necesarios para eliminar huecos.
+
+    Entrada: lista de (counter, filename, hash) ordenada por counter.
+    Salida:  lista de (old_name, new_name, hash, new_counter).
+             Solo incluye archivos cuyo nombre cambia.
+
+    El nuevo counter se asigna secuencialmente desde 1.
+    Reemplaza el patrón _NNNNN. en el nombre de archivo.
+    """
+    import re
+    plan = []
+    for new_counter, (_, filename, file_hash) in enumerate(files, start=1):
+        new_name = re.sub(
+            r'_(\d{5})(\.[^.]*$)',
+            f'_{new_counter:05d}\\2',
+            filename,
+        )
+        if new_name == filename:
+            continue
+        plan.append((filename, new_name, file_hash, new_counter))
+    return plan
+
+
+async def apply_compaction(
+    artist_dir: Path,
+    plan: list[tuple[str, str, str, int]],
+    new_total: int,
+) -> None:
+    """
+    Ejecuta el plan de compactación en dos fases (anti-colisión):
+
+    Fase 1: old_name → old_name.tmp  (todos)
+    Fase 2: old_name.tmp → new_name  (todos)
+
+    Después actualiza catalog.db en una transacción atómica:
+    - NULL-ifica registros "fantasma" que ocupan el nuevo nombre
+      (archivos purgados cuyo slot se reutiliza — se preserva su hash
+      para evitar re-descargas pero se limpia el filename)
+    - SET filename, counter WHERE hash = ? (update por clave primaria,
+      evita el problema de UPDATE encadenado por filename)
+    - SET counter (meta) = new_total
+    """
+    if not plan:
+        return
+
+    db_path = artist_dir / CATALOG_NAME
+    new_names = {new_name for _, new_name, _, _ in plan}
+    old_names = {old_name for old_name, _, _, _ in plan}
+
+    # Fase 1: → .tmp
+    for old_name, _, _, _ in plan:
+        (artist_dir / old_name).rename(
+            artist_dir / (old_name + ".tmp")
+        )
+
+    # Fase 2: .tmp → new_name
+    for old_name, new_name, _, _ in plan:
+        (artist_dir / (old_name + ".tmp")).rename(
+            artist_dir / new_name
+        )
+
+    # Actualizar DB en transacción atómica
+    async with aiosqlite.connect(db_path) as db:
+        # Paso 1: "apartar" cualquier registro que ya tenga
+        # filename = new_name pero que NO sea el archivo que movemos.
+        # Esto evita la "reactivación" de registros de archivos
+        # purgados cuyo slot es reutilizado.
+        # Se usa el prefijo '_purged_' (no coincide con _\d{5}\.ext)
+        # para respetar la restricción NOT NULL de la columna.
+        for _, new_name, file_hash, _ in plan:
+            await db.execute(
+                "UPDATE files SET filename = '_purged_' || hash"
+                " WHERE filename = ? AND hash != ?",
+                (new_name, file_hash),
+            )
+        # Paso 2: actualizar por hash (clave primaria) — sin riesgo
+        # de UPDATE encadenado por filename.
+        for _, new_name, file_hash, new_ctr in plan:
+            await db.execute(
+                "UPDATE files SET filename = ?, counter = ?"
+                " WHERE hash = ?",
+                (new_name, new_ctr, file_hash),
+            )
+        await db.execute(
+            "UPDATE meta SET value = ? WHERE key = 'counter'",
+            (new_total,),
+        )
+        await db.commit()
+
+
 async def get_stats(artist_dir: Path) -> dict:
     """Retorna estadísticas básicas del catálogo."""
     db_path = artist_dir / CATALOG_NAME

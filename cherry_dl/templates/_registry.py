@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from .base import SiteTemplate
 from .kemono import KemonoTemplate
 from .patreon import PatreonTemplate
+from .pixiv import PixivTemplate
 
 if TYPE_CHECKING:
     from ..engine import DownloadEngine
@@ -20,6 +21,7 @@ if TYPE_CHECKING:
 _TEMPLATES: list[type[SiteTemplate]] = [
     KemonoTemplate,
     PatreonTemplate,
+    PixivTemplate,
 ]
 
 

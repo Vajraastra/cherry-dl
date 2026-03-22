@@ -10,7 +10,7 @@ Cada template implementa la lógica específica de su sitio:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, AsyncIterator
 
 if TYPE_CHECKING:
@@ -35,7 +35,11 @@ class FileInfo:
     # URI canónica estable para dedup (usada como url_source en catalog.db).
     # Si está vacía, se usa `url` como clave de dedup (comportamiento Kemono).
     # Para Patreon: "patreon://media/{id}" o "patreon://attachment/{id}"
+    # Para Pixiv:   "pixiv://illust/{id}/p{n}" o "pixiv://ugoira/{id}"
     url_source: str = ""
+    # Headers adicionales que el engine debe incluir al descargar este archivo.
+    # Pixiv requiere Referer: https://www.pixiv.net/ en todas las descargas.
+    extra_headers: dict = field(default_factory=dict)
 
     @property
     def dedup_key(self) -> str:

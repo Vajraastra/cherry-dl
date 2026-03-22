@@ -322,6 +322,7 @@ class NewProfileModal(ModalScreen[dict | None]):
 
     async def _resolve_url(self) -> None:
         from ..auth.patreon import NeedsManualAuth
+        from ..auth.pixiv import NeedsPixivAuth
         from ..engine import DownloadEngine
         from ..templates._registry import get_template
 
@@ -352,6 +353,11 @@ class NewProfileModal(ModalScreen[dict | None]):
             ok = await self.app.push_screen_wait(PatreonAuthModal())
             if ok:
                 await self._resolve_url()
+        except NeedsPixivAuth:
+            lbl.update("[yellow]⚠ Se requiere autenticación con Pixiv[/]")
+            ok = await self.app.push_screen_wait(PixivAuthModal())
+            if ok:
+                await self._resolve_url()
         except Exception as exc:
             lbl.update(f"[red]✗ Error: {exc}[/]")
 
@@ -367,7 +373,7 @@ class NewProfileModal(ModalScreen[dict | None]):
             return
         cfg    = load_config()
         name   = self.query_one("#inp-name", Input).value.strip() or self._artist_info.name
-        folder = cfg.download_path / self._site / name
+        folder = cfg.download_path / name
         self.query_one("#inp-folder", Input).value = str(folder)
 
     def _submit(self, download: bool) -> None:
@@ -472,6 +478,95 @@ class PatreonAuthModal(ModalScreen):
 
         if cookies:
             save_patreon_cookies(cookies)
+            lbl.update("[green]✓ Sesión detectada correctamente[/]")
+            await asyncio.sleep(0.8)
+            self.dismiss(True)
+        else:
+            lbl.update(
+                "[red]✗ No se encontró sesión. "
+                "¿Completaste el login en el navegador?[/]"
+            )
+
+
+# ── PixivAuthModal ───────────────────────────────────────────────────────────
+
+class PixivAuthModal(ModalScreen):
+    """
+    Modal de autenticación de Pixiv.
+
+    Flujo:
+      1. Botón "Abrir Pixiv" → webbrowser.open() en el browser del sistema
+      2. Usuario inicia sesión en su browser normal (pixiv.net/login)
+      3. Botón "Ya inicié sesión" → browser_cookie3 lee las cookies
+      4. Si encuentra PHPSESSID → guarda en session.json → dismiss(True)
+      5. Si no → muestra error y permite reintentar
+    """
+
+    DEFAULT_CSS = """
+    PixivAuthModal {
+        align: center middle;
+    }
+    PixivAuthModal > Vertical {
+        width: 62;
+        height: auto;
+        padding: 1 2;
+        background: $surface;
+        border: solid $primary;
+    }
+    PixivAuthModal #lbl-status {
+        height: 1;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Label("[bold]Autenticación de Pixiv[/]")
+            yield Rule()
+            yield Label(
+                "No se detectó sesión activa de Pixiv en tu navegador.\n"
+            )
+            yield Label("Paso 1 — Abre Pixiv e inicia sesión:")
+            yield Button(
+                "🌐  Abrir pixiv.net/login",
+                id="btn-open-browser",
+                variant="primary",
+            )
+            yield Label("")
+            yield Label("Paso 2 — Vuelve aquí y confirma:")
+            yield Button(
+                "✓  Ya inicié sesión",
+                id="btn-check",
+                variant="success",
+            )
+            yield Label("", id="lbl-status")
+            yield Rule()
+            yield Button("Cancelar", id="btn-cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        match event.button.id:
+            case "btn-open-browser":
+                import webbrowser
+                webbrowser.open("https://www.pixiv.net/login.php")
+            case "btn-check":
+                self.run_worker(
+                    self._try_cookies(), exclusive=True, group="auth"
+                )
+            case "btn-cancel":
+                self.dismiss(False)
+
+    async def _try_cookies(self) -> None:
+        """Busca cookies de Pixiv en el browser tras el login del usuario."""
+        import asyncio
+        from ..auth.pixiv import load_from_browser, save_pixiv_cookies
+
+        lbl = self.query_one("#lbl-status", Label)
+        lbl.update("[yellow]Buscando sesión en el navegador…[/]")
+
+        # browser_cookie3 es síncrono — ejecutar en thread
+        cookies = await asyncio.to_thread(load_from_browser)
+
+        if cookies:
+            save_pixiv_cookies(cookies)
             lbl.update("[green]✓ Sesión detectada correctamente[/]")
             await asyncio.sleep(0.8)
             self.dismiss(True)
@@ -622,6 +717,63 @@ class ProfilesScreen(Screen):
         self.app.push_screen(ArtistScreen(profile_id))
 
 
+# ── CompactConfirmModal ─────────────────────────────────────────────────────
+
+class CompactConfirmModal(ModalScreen):
+    """Modal de doble confirmación antes de compactar numeración."""
+
+    DEFAULT_CSS = """
+    CompactConfirmModal > Vertical {
+        width: 60;
+        height: auto;
+        border: solid $warning;
+        background: $surface;
+        padding: 1 2;
+    }
+    CompactConfirmModal #compact-warning {
+        color: $warning;
+        text-style: bold;
+        margin-bottom: 1;
+    }
+    CompactConfirmModal #compact-info {
+        margin-bottom: 1;
+    }
+    CompactConfirmModal Horizontal {
+        height: 3;
+        align: center middle;
+    }
+    """
+
+    def __init__(self, total: int, to_rename: int) -> None:
+        super().__init__()
+        self._total     = total
+        self._to_rename = to_rename
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Label("⊟ Compactar numeración", id="compact-warning")
+            yield Label(
+                f"Se renombrarán [bold yellow]{self._to_rename}[/] archivos "
+                f"de [bold]{self._total}[/] en disco.\n"
+                "Esta acción modifica nombres en disco y no se puede deshacer.",
+                id="compact-info",
+                markup=True,
+            )
+            with Horizontal():
+                yield Button(
+                    "Cancelar", id="btn-compact-cancel", variant="default"
+                )
+                yield Button(
+                    "Confirmar", id="btn-compact-ok", variant="warning"
+                )
+
+    def on_mount(self) -> None:
+        self.query_one("#btn-compact-cancel", Button).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "btn-compact-ok")
+
+
 # ── ArtistScreen ────────────────────────────────────────────────────────────
 
 class ArtistScreen(Screen):
@@ -673,6 +825,7 @@ class ArtistScreen(Screen):
         with Horizontal(id="actions-row"):
             yield Button("⬡ Pre-scan",   id="btn-prescan")
             yield Button("⊘ Deduplicar", id="btn-dedup")
+            yield Button("⊟ Compactar",  id="btn-compact")
             yield Button("⟳ Verificar",  id="btn-verify")
             yield Button("▶ Descargar",  id="btn-download", classes="-primary")
             yield Button("✕ Cancelar",   id="btn-cancel",   classes="-danger")
@@ -790,6 +943,8 @@ class ArtistScreen(Screen):
             self._on_del_url()
         elif btn_id == "btn-dedup":
             self._start_dedup()
+        elif btn_id == "btn-compact":
+            self._confirm_compact()
         elif btn_id == "btn-prescan":
             self._start_prescan()
 
@@ -829,7 +984,7 @@ class ArtistScreen(Screen):
         keys = list(tbl.rows.keys())
         if row_idx >= len(keys):
             return
-        url_id = int(keys[row_idx])
+        url_id = int(keys[row_idx].value)
         try:
             async with aiosqlite.connect(INDEX_DB) as db:
                 await db.execute("DELETE FROM profile_urls WHERE id = ?", (url_id,))
@@ -883,8 +1038,11 @@ class ArtistScreen(Screen):
 
     def _set_busy(self, busy: bool) -> None:
         self._is_busy = busy
-        for btn_id in ("btn-download", "btn-verify", "btn-prescan", "btn-dedup",
-                       "btn-add-url", "btn-del-url"):
+        for btn_id in (
+            "btn-download", "btn-verify", "btn-prescan",
+            "btn-dedup", "btn-compact",
+            "btn-add-url", "btn-del-url",
+        ):
             self.query_one(f"#{btn_id}", Button).disabled = busy
         self.query_one("#btn-cancel", Button).disabled = not busy
         if busy:
@@ -939,6 +1097,7 @@ class ArtistScreen(Screen):
             update_profile_url_sync,
         )
         from ..auth.patreon import NeedsManualAuth
+        from ..auth.pixiv import NeedsPixivAuth
         from ..templates._registry import find_template, get_template
 
         profile = self._profile
@@ -993,6 +1152,19 @@ class ArtistScreen(Screen):
                         )
                     except Exception as exc:
                         self._log(f"[red]✗ Error tras auth: {exc}[/]")
+                        continue
+                except NeedsPixivAuth:
+                    self._log("[yellow]⚠ Pixiv requiere autenticación[/]")
+                    ok = await self.app.push_screen_wait(PixivAuthModal())
+                    if not ok:
+                        self._log("[red]✗ Autenticación cancelada[/]")
+                        continue
+                    try:
+                        artist_info = await template.get_artist_info(
+                            pu["url"]
+                        )
+                    except Exception as exc:
+                        self._log(f"[red]✗ Error tras auth Pixiv: {exc}[/]")
                         continue
                 self._log(f"[bold]▶ {artist_info.name} ({pu['site']})[/]")
 
@@ -1095,6 +1267,7 @@ class ArtistScreen(Screen):
                                         dest_dir=folder,
                                         filename=final_name,
                                         on_progress=make_cb(slot_id),
+                                        extra_headers=fi.extra_headers or None,
                                     ),
                                     timeout=600.0,
                                 )
@@ -1262,6 +1435,7 @@ class ArtistScreen(Screen):
                         url=file_info.url,
                         dest_dir=dest_folder,
                         filename=final_name,
+                        extra_headers=file_info.extra_headers or None,
                     )
                     if result.ok and result.file_hash:
                         await add_file(
@@ -1430,6 +1604,81 @@ class ArtistScreen(Screen):
         self._set_semaphore("done")
         await self._load_profile()
 
+    # ── Compactar ─────────────────────────────────────────────────────────
+
+    def _confirm_compact(self) -> None:
+        """Abre el modal de doble confirmación antes de compactar."""
+        profile = self._profile
+        if not profile:
+            return
+        folder = Path(profile["folder_path"])
+
+        async def _push() -> None:
+            from ..catalog import get_numbered_files, plan_compaction
+            files = await get_numbered_files(folder)
+            plan  = plan_compaction(files)
+            if not plan:
+                self.app.notify(
+                    "Numeración ya es continua — nada que compactar.",
+                    severity="information",
+                )
+                return
+            self.app.push_screen(
+                CompactConfirmModal(len(files), len(plan)),
+                callback=lambda ok: ok and self._start_compact(),
+            )
+
+        self.run_worker(_push(), exclusive=False)
+
+    @work(exclusive=True, group="download")
+    async def _start_compact(self) -> None:
+        self._set_busy(True)
+        self.query_one("#activity-log", RichLog).clear()
+        try:
+            await self._do_compact()
+        except asyncio.CancelledError:
+            self._log("[yellow]Compactación cancelada.[/]")
+            self._set_semaphore("cancelled")
+        except Exception as exc:
+            self._log(f"[red]✗ Error: {exc}[/]")
+            self._set_semaphore("error")
+        finally:
+            self._set_busy(False)
+
+    async def _do_compact(self) -> None:
+        from ..catalog import (
+            get_numbered_files, plan_compaction, apply_compaction,
+        )
+
+        profile = self._profile
+        if not profile:
+            return
+        folder = Path(profile["folder_path"])
+        if not folder.exists():
+            self._log("[red]Carpeta del artista no encontrada.[/]")
+            return
+
+        files = await get_numbered_files(folder)
+        plan  = plan_compaction(files)
+        if not plan:
+            self._log("[bold green]Numeración ya es continua — nada que hacer[/]")
+            self._set_semaphore("done")
+            return
+
+        self._log(
+            f"Compactando: [cyan]{len(files)}[/] archivos, "
+            f"[yellow]{len(plan)}[/] a renombrar…"
+        )
+
+        await apply_compaction(folder, plan, len(files))
+
+        self._log(
+            f"\n[bold green]Compactación completa — "
+            f"{len(plan)} archivos renombrados[/]"
+        )
+        self._set_semaphore("done")
+        await self._load_profile()
+
     # ── Pre-scan ──────────────────────────────────────────────────────────
 
     @work(exclusive=True, group="download")
@@ -1573,7 +1822,7 @@ class SettingsScreen(Screen):
     def action_save(self) -> None:
         try:
             cfg = load_config()
-            cfg.download_path       = Path(self.query_one("#cfg-download-dir", Input).value.strip())
+            cfg.download_dir        = self.query_one("#cfg-download-dir", Input).value.strip()
             cfg.workers             = int(self.query_one("#cfg-workers",       Input).value)
             cfg.timeout             = int(self.query_one("#cfg-timeout",       Input).value)
             cfg.network.stall_timeout = int(self.query_one("#cfg-stall",       Input).value)
