@@ -57,11 +57,18 @@ INSERT OR IGNORE INTO meta (key, value) VALUES ('counter', 0);
 
 # ── Inicialización ─────────────────────────────────────────────────────────────
 
+def _db(db_path) -> aiosqlite.Connection:
+    """Abre catalog.db con timeout=30 s — soporta workers concurrentes."""
+    return aiosqlite.connect(db_path, timeout=30)
+
+
 async def init_catalog(artist_dir: Path) -> None:
     """Crea o migra catalog.db en la carpeta del artista."""
     artist_dir.mkdir(parents=True, exist_ok=True)
     db_path = artist_dir / CATALOG_NAME
-    async with aiosqlite.connect(db_path) as db:
+    async with _db(db_path) as db:
+        # WAL: lectores no bloquean escritores ni viceversa
+        await db.execute("PRAGMA journal_mode=WAL")
         await db.execute(_CREATE_FILES)
         await db.execute(_CREATE_META)
         await db.execute(_CREATE_IDX)
@@ -90,7 +97,7 @@ async def next_counter(artist_dir: Path) -> int:
     otro worker pudiera aprovechar para obtener el mismo contador.
     """
     db_path = artist_dir / CATALOG_NAME
-    async with aiosqlite.connect(db_path) as db:
+    async with _db(db_path) as db:
         async with db.execute(
             "UPDATE meta SET value = value + 1 WHERE key = 'counter' RETURNING value"
         ) as cur:
@@ -113,7 +120,7 @@ async def url_exists(artist_dir: Path, url: str) -> bool:
     Permite detectar duplicados ANTES de descargar, sin necesidad de hash.
     """
     db_path = artist_dir / CATALOG_NAME
-    async with aiosqlite.connect(db_path) as db:
+    async with _db(db_path) as db:
         async with db.execute(
             "SELECT 1 FROM files WHERE url_source = ? LIMIT 1", (url,)
         ) as cur:
@@ -123,7 +130,7 @@ async def url_exists(artist_dir: Path, url: str) -> bool:
 async def hash_exists(artist_dir: Path, file_hash: str) -> bool:
     """Retorna True si el hash ya está registrado en el catálogo."""
     db_path = artist_dir / CATALOG_NAME
-    async with aiosqlite.connect(db_path) as db:
+    async with _db(db_path) as db:
         async with db.execute(
             "SELECT 1 FROM files WHERE hash = ? LIMIT 1", (file_hash,)
         ) as cur:
@@ -135,7 +142,7 @@ async def get_all_hashes(artist_dir: Path) -> set[str]:
     db_path = artist_dir / CATALOG_NAME
     if not db_path.exists():
         return set()
-    async with aiosqlite.connect(db_path) as db:
+    async with _db(db_path) as db:
         async with db.execute("SELECT hash FROM files") as cur:
             rows = await cur.fetchall()
     return {row[0] for row in rows}
@@ -151,7 +158,7 @@ async def add_file(
 ) -> None:
     """Registra un archivo nuevo en el catálogo."""
     db_path = artist_dir / CATALOG_NAME
-    async with aiosqlite.connect(db_path) as db:
+    async with _db(db_path) as db:
         await db.execute(
             """
             INSERT OR IGNORE INTO files
@@ -171,7 +178,7 @@ async def get_all_files(artist_dir: Path) -> list[dict]:
     db_path = artist_dir / CATALOG_NAME
     if not db_path.exists():
         return []
-    async with aiosqlite.connect(db_path) as db:
+    async with _db(db_path) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT hash, filename, url_source, file_size, counter FROM files"
@@ -183,7 +190,7 @@ async def get_all_files(artist_dir: Path) -> list[dict]:
 async def remove_file(artist_dir: Path, file_hash: str) -> None:
     """Elimina un registro del catálogo por hash (usado en repair al re-indexar)."""
     db_path = artist_dir / CATALOG_NAME
-    async with aiosqlite.connect(db_path) as db:
+    async with _db(db_path) as db:
         await db.execute("DELETE FROM files WHERE hash = ?", (file_hash,))
         await db.commit()
 
@@ -205,7 +212,7 @@ async def get_numbered_files(
     db_path = artist_dir / CATALOG_NAME
     if not db_path.exists():
         return []
-    async with aiosqlite.connect(db_path) as db:
+    async with _db(db_path) as db:
         async with db.execute(
             "SELECT filename, hash FROM files WHERE counter IS NOT NULL"
         ) as cur:
@@ -273,8 +280,6 @@ async def apply_compaction(
         return
 
     db_path = artist_dir / CATALOG_NAME
-    new_names = {new_name for _, new_name, _, _ in plan}
-    old_names = {old_name for old_name, _, _, _ in plan}
 
     # Fase 1: → .tmp
     for old_name, _, _, _ in plan:
@@ -289,7 +294,7 @@ async def apply_compaction(
         )
 
     # Actualizar DB en transacción atómica
-    async with aiosqlite.connect(db_path) as db:
+    async with _db(db_path) as db:
         # Paso 1: "apartar" cualquier registro que ya tenga
         # filename = new_name pero que NO sea el archivo que movemos.
         # Esto evita la "reactivación" de registros de archivos
@@ -322,7 +327,7 @@ async def get_stats(artist_dir: Path) -> dict:
     db_path = artist_dir / CATALOG_NAME
     if not db_path.exists():
         return {"total": 0, "total_size": 0}
-    async with aiosqlite.connect(db_path) as db:
+    async with _db(db_path) as db:
         async with db.execute(
             "SELECT COUNT(*), COALESCE(SUM(file_size), 0) FROM files"
         ) as cur:

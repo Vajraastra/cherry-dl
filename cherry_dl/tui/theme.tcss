@@ -187,7 +187,7 @@ ProgressBar > .bar--indeterminate {
 
 /* ── Estado del semáforo ───────────────────────────────────────────────────── */
 
-.status-idle    { color: #555577; }
+.status-idle    { color: #8888aa; }
 .status-running { color: #00cc66; text-style: bold; }
 .status-done    { color: #44aaff; text-style: bold; }
 .status-error   { color: #ff4444; text-style: bold; }
@@ -327,25 +327,27 @@ Rule {
 /* ── ArtistScreen — barra de estado (SIEMPRE VISIBLE) ─────────────────────── */
 
 #status-bar {
-    dock: bottom;
     height: 1;
-    background: #0d0d1a;
-    border-top: solid #2a2a42;
-    padding: 0 2;
     layout: horizontal;
     align: left middle;
+    background: #111128;
+}
+
+#status-bar .section-label {
+    width: auto;
+    background: #111128;
 }
 
 #semaphore {
     width: auto;
-    padding-right: 2;
+    padding: 0 2;
 }
 
 #counters-label {
-    dock: right;
-    width: auto;
-    color: #555577;
+    width: 1fr;
+    color: #8888aa;
     content-align: right middle;
+    text-align: right;
 }
 
 /* ── WorkerRow ─────────────────────────────────────────────────────────────── */

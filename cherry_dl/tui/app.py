@@ -834,16 +834,12 @@ class ArtistScreen(Screen):
         yield Label("  WORKERS", classes="section-label")
         yield Container(id="workers-panel")
 
-        # Log de actividad
-        yield Label("  ACTIVIDAD", classes="section-label")
-        yield RichLog(id="activity-log", highlight=True, markup=True)
-
-        # Barra de estado — docked en CSS (siempre visible sobre el Footer)
+        # Encabezado de actividad con semáforo y contadores inline
         with Horizontal(id="status-bar"):
+            yield Label("  ACTIVIDAD", classes="section-label")
             yield Label("● Listo", id="semaphore", classes="status-idle")
             yield Static("", id="counters-label")
-
-        yield Footer()
+        yield RichLog(id="activity-log", highlight=True, markup=True)
 
     def on_mount(self) -> None:
         # Inicializar tabla de fuentes
@@ -1410,12 +1406,31 @@ class ArtistScreen(Screen):
                     ],
                 ]
                 try:
-                    await asyncio.gather(*_all_tasks, return_exceptions=True)
+                    _results = await asyncio.gather(
+                        *_all_tasks, return_exceptions=True
+                    )
                 except asyncio.CancelledError:
                     for t in _all_tasks:
                         t.cancel()
                     await asyncio.gather(*_all_tasks, return_exceptions=True)
                     raise
+
+                # El primer resultado es el producer. Si murió con excepción
+                # (error de red, timeout de paginación, etc.) la reportamos
+                # explícitamente — de lo contrario el proceso parece "completo"
+                # pero faltan archivos sin mostrar ningún error.
+                _producer_exc = _results[0]
+                if isinstance(_producer_exc, Exception):
+                    import traceback as _tb
+                    self._log(
+                        f"\n[bold red]✗ Error en paginación "
+                        f"({type(_producer_exc).__name__}): "
+                        f"{_producer_exc}[/]"
+                    )
+                    self._log(
+                        "[yellow]⚠ La descarga quedó incompleta. "
+                        "Usa Sync de nuevo para continuar.[/]"
+                    )
 
                 # Actualizar conteo de fuente
                 source_dl = downloaded_ref[0] - dl_before
@@ -1468,7 +1483,10 @@ class ArtistScreen(Screen):
         if def_:
             summary += f"  ⏭ {def_} para próxima sync"
         self._log(f"\n[bold green]{summary}[/]")
-        self._set_semaphore("done")
+        if err or def_:
+            self._set_semaphore("cancelled")   # amarillo: pendientes/errores
+        else:
+            self._set_semaphore("done")        # azul: todo completado
         await self._load_profile()
 
     # ── Verificar ─────────────────────────────────────────────────────────
