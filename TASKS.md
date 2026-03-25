@@ -1,6 +1,6 @@
 # TASKS — cherry-dl
 
-## Estado actual (2026-03-22)
+## Estado actual (2026-03-24)
 
 ### Fase 1 — COMPLETA ✓
 - [x] Scaffolding del proyecto
@@ -186,6 +186,16 @@ La compactación es puramente de organización (numeración sin huecos).
 - [x] Bug `database is locked` con 3+ workers: SQLite fallaba inmediatamente en escrituras concurrentes → `aiosqlite.connect(timeout=30)` + `PRAGMA journal_mode=WAL` en `init_catalog`
 - [x] Bug producer silencioso: errores de red durante paginación eran tragados por `gather(return_exceptions=True)` → resultado del producer validado post-gather, error logueado + semáforo en rojo
 - [x] Semáforo: estado "done" azul (todo correcto) vs "cancelled" amarillo (pendientes o errores parciales)
+
+---
+
+### Fase 9 — Descarga incremental: COMPLETA ✓ (2026-03-24)
+- [x] `base.py`: `iter_files(since: datetime | None)` + helper `parse_date_utc()`
+- [x] `kemono.py`: para paginación cuando `post["published"] < since` (newest-first)
+- [x] `patreon.py`: para paginación cuando `post["published_at"] < since` (newest-first)
+- [x] `pixiv.py`: omite obras con `createDate < since` en `_process_batch` (sin llamadas extras)
+- [x] TUI: botón "↑ Actualizar" — pasa `last_synced` de cada URL como `since` al template
+- [x] Smoke test: imports, `parse_date_utc` (7 casos), firmas, TUI
 
 ---
 

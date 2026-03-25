@@ -957,4 +957,60 @@ Con la fase intermedia `.tmp`, ningún nombre final puede colisionar.
 - Muestra el plan (tabla: viejo → nuevo, N archivos)
 - Confirmación interactiva: `¿Continuar? [s/N]`
 - Flag `--yes` para omitir confirmación (uso en scripts)
+
+---
+
+## Fase 9 — Descarga incremental ("Actualizar") — 2026-03-24
+
+### Problema
+No existía forma de descargar solo el contenido nuevo desde la última sync. El botón
+"Descargar" siempre iteraba todos los posts/obras del artista desde el inicio, dejando
+que el sistema de dedup (url_source / hash) descartara lo ya descargado. Ineficiente
+en artistas con miles de posts.
+
+### Solución implementada
+
+**`templates/base.py`**
+- `iter_files()` acepta nuevo parámetro `since: datetime | None = None`
+- Helper `parse_date_utc(s)` exportado desde `base.py`:
+  - Normaliza cualquier formato ISO 8601 a `datetime` UTC naive
+  - Acepta: naive, `+00:00`, `.000+00:00` (Patreon), `Z`, `YYYY-MM-DD HH:MM:SS` (SQLite)
+  - Retorna `None` en cadena vacía o inparseable
+
+**`templates/kemono.py`**
+- `iter_files(since)` — dentro del loop de posts, compara `post["published"]` contra `since`
+- Si `pub < since`: hace `return` → para toda la paginación
+- Justificación: Kemono devuelve posts newest-first; todos los siguientes también serían más viejos
+
+**`templates/patreon.py`**
+- `iter_files(since)` pasa `since` a `_iter_posts(since)`
+- `_iter_posts(since)` compara `post["attributes"]["published_at"]` contra `since`
+- Si `pub < since`: hace `return` → para paginación cursor-based
+- Justificación: Patreon devuelve posts newest-first (sort=-published_at)
+
+**`templates/pixiv.py`**
+- `iter_files(since)` → `_iter_all(since)` → `_process_batch(since)`
+- En `_process_batch`: compara `work["createDate"]` contra `since`
+- Si `pub < since`: `continue` (no `return` — IDs de Pixiv no tienen orden garantizado)
+- Optimización: se saltea las llamadas extra a `/pages` y `/ugoira_meta` para obras antiguas,
+  evitando peticiones HTTP innecesarias
+
+**`tui/app.py`**
+- Botón `↑ Actualizar` (id=`btn-update`) — entre "Verificar" y "Descargar"
+- Se deshabilita durante operaciones activas (junto con los demás botones)
+- `action_start_update()` → `_run_download(update_only=True)`
+- `_do_download(update_only)` calcula `url_since` por URL individual:
+  - Lee `pu["last_synced"]` de cada fuente
+  - `parse_date_utc(pu["last_synced"])` → `since` para esa fuente
+  - Si `last_synced` es `None` (nunca synced): hace descarga completa de esa fuente
+  - Log: `↑ Actualizar desde YYYY-MM-DD HH:MM`
+
+### Smoke test
+- Imports de los 3 templates + TUI: OK
+- `parse_date_utc`: 7 casos (naive, UTC+tz, ms, SQLite, Z, vacío, basura): OK
+- Firmas de `iter_files`, `_process_batch`, `_iter_posts` verificadas via `inspect`: OK
+- `_run_download(update_only)`, `_do_download(update_only)`, `action_start_update`: OK
+
+### Commit
+`a8837ee` — feat: botón Actualizar — descarga incremental desde última sync
 - Flag `--dry-run` para ver el plan sin ejecutar
