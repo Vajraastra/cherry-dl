@@ -18,12 +18,13 @@ Estado verificado 2026-03-18:
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from typing import AsyncIterator
 from urllib.parse import urlparse
 
 import httpx
 
-from .base import ArtistInfo, FileInfo, SiteTemplate
+from .base import ArtistInfo, FileInfo, SiteTemplate, parse_date_utc
 
 # ── Constantes ─────────────────────────────────────────────────────────────────
 
@@ -107,21 +108,31 @@ class KemonoTemplate(SiteTemplate):
 
     # ── Iteración de archivos ──────────────────────────────────────────────────
 
-    async def iter_files(self, artist: ArtistInfo) -> AsyncIterator[FileInfo]:
+    async def iter_files(
+        self,
+        artist: ArtistInfo,
+        since: datetime | None = None,
+    ) -> AsyncIterator[FileInfo]:
         """
-        Itera sobre todos los archivos del artista usando posts-legacy.
+        Itera sobre todos los archivos del artista.
 
         Paginación:
-          - 1ª llamada: sin ?o (evita el bug de offset=0)
-          - Siguientes: ?o=50, ?o=100, ...
-          - Termina cuando la respuesta es lista vacía
+          - 1ª llamada: ?o=0, siguientes ?o=50, ?o=100...
+          - Termina cuando la respuesta es lista vacía o 400/404.
+
+        Si `since` está definido, se detiene en cuanto encuentra un post
+        publicado antes de esa fecha (los posts vienen de más nuevo a más
+        antiguo, por lo que todos los siguientes también serían anteriores).
         """
-        service = artist.service
+        service    = artist.service
         creator_id = artist.artist_id
         offset: int = 0
 
         while True:
-            url = f"{_BASE}/api/v1/{service}/user/{creator_id}/posts?o={offset}"
+            url = (
+                f"{_BASE}/api/v1/{service}/user/{creator_id}"
+                f"/posts?o={offset}"
+            )
 
             try:
                 posts = await self.engine.get_json(url)
@@ -131,11 +142,14 @@ class KemonoTemplate(SiteTemplate):
                     break
                 raise
 
-            # Lista vacía = fin de paginación
             if not posts:
                 break
 
             for post in posts:
+                if since is not None:
+                    pub = parse_date_utc(post.get("published", ""))
+                    if pub is not None and pub < since:
+                        return  # posts son newest-first → parar paginación
                 for file_info in _extract_files_from_post(post, artist):
                     yield file_info
 

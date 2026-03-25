@@ -827,6 +827,7 @@ class ArtistScreen(Screen):
             yield Button("⊘ Deduplicar", id="btn-dedup")
             yield Button("⊟ Compactar",  id="btn-compact")
             yield Button("⟳ Verificar",  id="btn-verify")
+            yield Button("↑ Actualizar", id="btn-update")
             yield Button("▶ Descargar",  id="btn-download", classes="-primary")
             yield Button("✕ Cancelar",   id="btn-cancel",   classes="-danger")
 
@@ -929,6 +930,8 @@ class ArtistScreen(Screen):
         btn_id = event.button.id
         if btn_id == "btn-download":
             self.action_start_download()
+        elif btn_id == "btn-update":
+            self.action_start_update()
         elif btn_id == "btn-cancel":
             self.action_cancel_download()
         elif btn_id == "btn-verify":
@@ -1001,6 +1004,11 @@ class ArtistScreen(Screen):
             return
         self._run_download()
 
+    def action_start_update(self) -> None:
+        if self._is_busy or not self._profile:
+            return
+        self._run_download(update_only=True)
+
     def action_cancel_download(self) -> None:
         self.workers.cancel_group(self, "download")
 
@@ -1035,7 +1043,7 @@ class ArtistScreen(Screen):
     def _set_busy(self, busy: bool) -> None:
         self._is_busy = busy
         for btn_id in (
-            "btn-download", "btn-verify", "btn-prescan",
+            "btn-download", "btn-update", "btn-verify", "btn-prescan",
             "btn-dedup", "btn-compact",
             "btn-add-url", "btn-del-url",
         ):
@@ -1065,11 +1073,11 @@ class ArtistScreen(Screen):
     # ── Download ──────────────────────────────────────────────────────────
 
     @work(exclusive=True, group="download")
-    async def _run_download(self) -> None:
+    async def _run_download(self, update_only: bool = False) -> None:
         self._set_busy(True)
         self.query_one("#activity-log", RichLog).clear()
         try:
-            await self._do_download()
+            await self._do_download(update_only=update_only)
         except asyncio.CancelledError:
             self._log("[yellow]Descarga cancelada por el usuario.[/]")
             self._set_semaphore("cancelled")
@@ -1079,7 +1087,9 @@ class ArtistScreen(Screen):
         finally:
             self._set_busy(False)
 
-    async def _do_download(self) -> None:
+    async def _do_download(self, update_only: bool = False) -> None:
+        from datetime import datetime
+
         from ..engine import DownloadEngine, ErrorKind
         from ..gui.bridge import (
             _build_local_hash_map,
@@ -1095,6 +1105,7 @@ class ArtistScreen(Screen):
         from ..auth.patreon import NeedsManualAuth
         from ..auth.pixiv import NeedsPixivAuth
         from ..templates._registry import find_template, get_template
+        from ..templates.base import parse_date_utc
 
         profile = self._profile
         if not profile:
@@ -1179,6 +1190,15 @@ class ArtistScreen(Screen):
                     INDEX_DB, pu["id"], artist_id=artist_info.artist_id
                 )
 
+                # Calcular fecha de corte para "Actualizar"
+                url_since: datetime | None = None
+                if update_only and pu.get("last_synced"):
+                    url_since = parse_date_utc(pu["last_synced"])
+                    if url_since:
+                        self._log(
+                            f"  [dim]↑ Actualizar desde {pu['last_synced'][:16]}[/]"
+                        )
+
                 dl_before    = downloaded_ref[0]
                 local_hashes = await _build_local_hash_map(folder)
                 file_queue: asyncio.Queue = asyncio.Queue(maxsize=workers * 3)
@@ -1186,7 +1206,9 @@ class ArtistScreen(Screen):
 
                 async def producer() -> None:
                     try:
-                        async for fi in template.iter_files(artist_info):
+                        async for fi in template.iter_files(
+                            artist_info, since=url_since
+                        ):
                             if not _passes_ext_filter(fi.filename, ext_filter, not ext_filter):
                                 skipped_ref[0] += 1
                                 self._log(f"  [dim]— {fi.filename[:60]}  [filtro ext][/]")

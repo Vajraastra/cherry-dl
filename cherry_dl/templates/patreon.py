@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import random
 import re
+from datetime import datetime
 from typing import AsyncIterator
 from urllib.parse import parse_qs, urlencode, urlparse
 
@@ -39,7 +40,7 @@ from ..auth.patreon import (
     ensure_patreon_session,
     refresh_patreon_cookies,
 )
-from .base import ArtistInfo, FileInfo, SiteTemplate
+from .base import ArtistInfo, FileInfo, SiteTemplate, parse_date_utc
 
 # ── Constantes ─────────────────────────────────────────────────────────────────
 
@@ -168,16 +169,21 @@ class PatreonTemplate(SiteTemplate):
 
     # ── Iteración de archivos ──────────────────────────────────────────────────
 
-    async def iter_files(self, artist: ArtistInfo) -> AsyncIterator[FileInfo]:
+    async def iter_files(
+        self,
+        artist: ArtistInfo,
+        since: datetime | None = None,
+    ) -> AsyncIterator[FileInfo]:
         """
         Itera todos los archivos del artista de más nuevo a más viejo.
 
         Paginación cursor-based: sigue links.next hasta que no haya más.
-        El engine filtra duplicados via dedup_key → url_exists() en catalog.db.
+        Si `since` está definido, para cuando encuentra un post publicado
+        antes de esa fecha.
         """
         try:
             async for post_data, included_map in self._iter_posts(
-                artist.artist_id
+                artist.artist_id, since=since
             ):
                 for fi in _extract_files_from_post(
                     post_data, included_map, artist
@@ -232,6 +238,7 @@ class PatreonTemplate(SiteTemplate):
     async def _iter_posts(
         self,
         campaign_id: str,
+        since: datetime | None = None,
     ) -> AsyncIterator[tuple[dict, dict]]:
         """
         Genera (post_data, included_map) para cada post del creador.
@@ -301,6 +308,12 @@ class PatreonTemplate(SiteTemplate):
                 break
 
             for post in posts:
+                if since is not None:
+                    pub = parse_date_utc(
+                        post.get("attributes", {}).get("published_at", "")
+                    )
+                    if pub is not None and pub < since:
+                        return  # posts sorted newest-first → parar
                 yield post, included_map
 
             # Seguir cursor de la próxima página

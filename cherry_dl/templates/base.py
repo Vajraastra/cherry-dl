@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, AsyncIterator
 
 if TYPE_CHECKING:
@@ -93,7 +94,11 @@ class SiteTemplate(ABC):
         ...
 
     @abstractmethod
-    def iter_files(self, artist: ArtistInfo) -> AsyncIterator[FileInfo]:
+    def iter_files(
+        self,
+        artist: ArtistInfo,
+        since: datetime | None = None,
+    ) -> AsyncIterator[FileInfo]:
         """
         Genera todos los archivos disponibles para un artista.
         Implementa paginación interna según el sitio.
@@ -106,3 +111,28 @@ class SiteTemplate(ABC):
 
     def __repr__(self) -> str:
         return f"<Template:{self.name}>"
+
+
+# ── Utilidad de fechas ─────────────────────────────────────────────────────────
+
+def parse_date_utc(s: str) -> datetime | None:
+    """
+    Parsea una cadena ISO 8601 y la normaliza a datetime UTC sin tzinfo.
+
+    Acepta formatos:
+      - "2024-03-15T10:30:00"          (naive, asumido UTC)
+      - "2024-03-15T10:30:00+00:00"    (UTC explícito)
+      - "2024-03-15T10:30:00.000+00:00" (Patreon)
+      - "2026-03-25 14:30:00"           (SQLite datetime('now'))
+      - "2024-03-15T10:30:00Z"          (forma compacta UTC)
+    Retorna None si la cadena está vacía o no es parseable.
+    """
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt
+    except (ValueError, TypeError):
+        return None

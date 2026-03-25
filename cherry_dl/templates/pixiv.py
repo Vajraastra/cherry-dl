@@ -50,6 +50,7 @@ from __future__ import annotations
 import asyncio
 import random
 import re
+from datetime import datetime
 from typing import AsyncIterator
 from urllib.parse import urlparse
 
@@ -61,7 +62,7 @@ from ..auth.pixiv import (
     ensure_pixiv_session,
     save_pixiv_cookies,
 )
-from .base import ArtistInfo, FileInfo, SiteTemplate
+from .base import ArtistInfo, FileInfo, SiteTemplate, parse_date_utc
 
 # ── Constantes ─────────────────────────────────────────────────────────────────
 
@@ -221,25 +222,36 @@ class PixivTemplate(SiteTemplate):
 
     # ── Iteración de archivos ──────────────────────────────────────────────────
 
-    async def iter_files(self, artist: ArtistInfo) -> AsyncIterator[FileInfo]:
+    async def iter_files(
+        self,
+        artist: ArtistInfo,
+        since: datetime | None = None,
+    ) -> AsyncIterator[FileInfo]:
         """
         Itera todas las obras del artista: ilustraciones, manga y ugoiras.
 
         Flujo:
           1. /ajax/user/{id}/profile/all  → lista de todos los IDs
           2. Por lotes de 48: /ajax/user/{id}/illusts?ids[]=... → detalles
-          3. Si illustType == 2 (ugoira): llamada extra a /ajax/illust/{id}/ugoira_meta
-          4. Si pageCount > 1: llamada extra a /ajax/illust/{id}/pages
+          3. Si illustType == 2: llamada extra a /ajax/illust/{id}/ugoira_meta
+          4. Otros: llamada extra a /ajax/illust/{id}/pages
+
+        Si `since` está definido, omite obras con createDate anterior a esa
+        fecha (sin hacer las llamadas extra de /pages o /ugoira_meta).
         """
         try:
-            async for fi in self._iter_all(artist):
+            async for fi in self._iter_all(artist, since=since):
                 yield fi
         finally:
             await self._close_client()
 
     # ── Internos ───────────────────────────────────────────────────────────────
 
-    async def _iter_all(self, artist: ArtistInfo) -> AsyncIterator[FileInfo]:
+    async def _iter_all(
+        self,
+        artist: ArtistInfo,
+        since: datetime | None = None,
+    ) -> AsyncIterator[FileInfo]:
         """Obtiene la lista completa de IDs y los procesa en lotes."""
         client = await self._get_client()
 
@@ -266,7 +278,9 @@ class PixivTemplate(SiteTemplate):
 
         # Paso 2 — procesar por lotes
         for batch in _chunked(all_ids, _BATCH_SIZE):
-            async for fi in self._process_batch(client, batch, artist):
+            async for fi in self._process_batch(
+                client, batch, artist, since=since
+            ):
                 yield fi
 
     async def _process_batch(
@@ -274,10 +288,14 @@ class PixivTemplate(SiteTemplate):
         client: httpx.AsyncClient,
         ids: list[str],
         artist: ArtistInfo,
+        since: datetime | None = None,
     ) -> AsyncIterator[FileInfo]:
         """
         Solicita metadatos para un lote de IDs (illustType, pageCount).
         Para cada obra llama /pages (o /ugoira_meta) para obtener la URL original.
+
+        Si `since` está definido, omite obras con createDate anterior sin
+        hacer las llamadas extra de /pages o /ugoira_meta.
 
         GET /ajax/user/{uid}/illusts?ids[]=id1&ids[]=id2&...&lang=en
         Estructura de respuesta: {"body": {"id": {...work...}}}  — IDs en body directo.
@@ -300,6 +318,12 @@ class PixivTemplate(SiteTemplate):
         for illust_id, work in works.items():
             if not work:
                 continue
+
+            # Filtrar por fecha sin hacer llamadas extra al CDN
+            if since is not None:
+                pub = parse_date_utc(work.get("createDate", ""))
+                if pub is not None and pub < since:
+                    continue
 
             illust_type = int(work.get("illustType", 0))
             page_count  = int(work.get("pageCount", 1))
