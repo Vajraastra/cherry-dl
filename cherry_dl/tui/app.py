@@ -1278,6 +1278,13 @@ class ArtistScreen(Screen):
                                         self._worker_rows[s].progress(done, total)
                                 return cb
 
+                            # El engine maneja su propio timeout total (570s) y
+                            # retorna DownloadResult(TIMEOUT) de forma limpia.
+                            # asyncio.wait_for se mantiene en 660s solo como
+                            # safety net de último recurso — en Python 3.12
+                            # wait_for puede propagar CancelledError en lugar de
+                            # TimeoutError cuando httpx re-crea excepciones al
+                            # hacer cleanup de streams HTTP/2.
                             try:
                                 result = await asyncio.wait_for(
                                     engine.download(
@@ -1286,8 +1293,9 @@ class ArtistScreen(Screen):
                                         filename=final_name,
                                         on_progress=make_cb(slot_id),
                                         extra_headers=fi.extra_headers or None,
+                                        total_timeout=570.0,
                                     ),
-                                    timeout=600.0,
+                                    timeout=660.0,
                                 )
                             except asyncio.TimeoutError:
                                 if slot_id < len(self._worker_rows):
@@ -1459,21 +1467,44 @@ class ArtistScreen(Screen):
                 new_count = (pu["file_count"] or 0) + source_dl
                 await update_profile_url_sync(INDEX_DB, pu["id"], file_count=new_count)
 
-            # Cola diferida
+            # Cola diferida — reintentar archivos que agotaron el timeout inicial.
+            # Usa el primer worker slot como indicador visual y aplica el mismo
+            # timeout de 600s para evitar que el TUI se congele indefinidamente.
             if deferred:
                 self._log(f"\n[yellow]⏭ Cola diferida: {len(deferred)} archivo(s)…[/]")
+                _slot0 = self._worker_rows[0] if self._worker_rows else None
                 for file_info, a_info, dest_folder in deferred:
                     if await url_exists(dest_folder, file_info.dedup_key):
                         skipped_ref[0] += 1
                         continue
                     counter    = await next_counter(dest_folder)
                     final_name = build_filename(a_info.name, counter, file_info.filename)
-                    result = await engine.download(
-                        url=file_info.url,
-                        dest_dir=dest_folder,
-                        filename=final_name,
-                        extra_headers=file_info.extra_headers or None,
-                    )
+                    if _slot0:
+                        _slot0.start(file_info.filename)
+                    try:
+                        result = await asyncio.wait_for(
+                            engine.download(
+                                url=file_info.url,
+                                dest_dir=dest_folder,
+                                filename=final_name,
+                                extra_headers=file_info.extra_headers or None,
+                                total_timeout=570.0,
+                            ),
+                            timeout=660.0,
+                        )
+                    except asyncio.TimeoutError:
+                        if _slot0:
+                            _slot0.done(file_info.filename, "⏭")
+                        deferred_count_ref[0] += 1
+                        self._log(
+                            f"  [yellow]⏭ {file_info.filename[:55]}  "
+                            f"[timeout — pendiente próx. sync][/]"
+                        )
+                        self._update_counters(
+                            downloaded_ref[0], skipped_ref[0],
+                            errors_ref[0], deferred_count_ref[0],
+                        )
+                        continue
                     if result.ok and result.file_hash:
                         await add_file(
                             artist_dir=dest_folder,
@@ -1484,14 +1515,20 @@ class ArtistScreen(Screen):
                             counter=counter,
                         )
                         downloaded_ref[0] += 1
+                        if _slot0:
+                            _slot0.done(final_name, "✓")
                         self._log(f"  [green]✓ {final_name} (reintento)[/]")
                     else:
+                        if _slot0:
+                            _slot0.done(file_info.filename, "⏭")
                         deferred_count_ref[0] += 1
-                        self._log(f"  [yellow]⏭ {file_info.filename} — pendiente próx. sync[/]")
+                        self._log(f"  [yellow]⏭ {file_info.filename[:55]}  — pendiente próx. sync[/]")
                     self._update_counters(
                         downloaded_ref[0], skipped_ref[0],
                         errors_ref[0], deferred_count_ref[0],
                     )
+                if _slot0:
+                    _slot0.idle()
 
         # Resumen final
         await update_profile_last_checked(INDEX_DB, profile["id"])

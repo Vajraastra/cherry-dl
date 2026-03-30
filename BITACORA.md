@@ -527,6 +527,66 @@ al nuevo scope. Se migra a **PySide6 + qasync**.
 
 ## Errores encontrados y soluciones
 
+### 2026-03-27 — Throttling severo + archivos corruptos en descargas de Kemono
+**Síntoma:** descargas a ~50 KB/s desde el inicio, y archivos descargados con contenido erróneo (572 bytes de HTML en lugar del archivo real).
+**Causa raíz:** el header `Accept: text/css` (bypass de DDoS-Guard para el API) estaba configurado a nivel del cliente httpx global, y se enviaba también en todas las requests al CDN de archivos. El CDN de kemono.cr responde con **HTTP 500** a requests con `Accept: text/css`, devolviendo una página de error HTML que el engine guardaba como el archivo descargado.
+**Diagnóstico activo:** se verificó con requests directas:
+  - `Accept: text/css` → 500 en CDN de archivos
+  - `Accept: */*` → 200 OK, velocidad real del CDN (~70-100 KB/s por conexión)
+  - El API documenta explícitamente en su 403: *"use Accept: text/css for scraping"* — solo aplica al API, no al CDN.
+**Solución (engine.py):**
+  - Renombrar `_DDG_HEADERS` → `_CLIENT_HEADERS` (sin `Accept: text/css`)
+  - Agregar `_DDG_ACCEPT = {"Accept": "text/css"}` como dict separado
+  - Aplicar `_DDG_ACCEPT` solo en `_get_json_with_retry()` como header por-request
+  - El cliente httpx ya no incluye `Accept: text/css` en descargas de archivos
+**Fix secundario (templates/kemono.py):**
+  - `_hash_from_path()` esperaba el prefijo `/data/` en las rutas del CDN
+  - El API de kemono.cr eliminó ese prefijo: paths ahora son `/{2chars}/{2chars}/{sha256}/{filename}`
+  - Se actualizó para detectar ambos formatos (legado con `/data/`, actual sin él)
+
+### 2026-03-27 — Descargas truncadas + TUI congelado en cola diferida
+**Síntoma:** archivos se descargan parcialmente y se guardan como completos; workers desaparecen del panel sin entrada en el log; TUI se congela sin retroalimentación durante cola diferida.
+**Causa 1 (archivos truncados):** el CDN de Kemono cierra la conexión antes de enviar todos los bytes declarados en `Content-Length` como mecanismo de throttling. `httpx` interpreta el cierre temprano como fin de stream normal — el engine guardaba el archivo parcial y lo reportaba como descarga exitosa.
+**Solución:** validación de `Content-Length` vs bytes recibidos en `_do_download` (engine.py). Si `total < content_length`, se descarta el buffer, se trata como `NETWORK` error y se reintenta con backoff.
+**Causa 1b (confirmado por el usuario):** todos los archivos que fallaron superan los 4 MB. El CDN reporta `x-cache-range: bytes=0-4194303` — sirve en chunks de exactamente 4 MB y cierra la conexión al terminar cada chunk. Archivos < 4 MB completan sin problema.
+**Solución definitiva (engine.py — Range requests):** se refactorizó `_do_download` para acumular chunks via `Range: bytes=N-` entre segmentos. Se separaron los contadores de error: los range resumes no cuentan como error real; solo timeouts/connection errors/5xx incrementan `error_count`. Se agregó el helper `_parse_content_range_total()` para leer el tamaño total de `Content-Range`. El servidor puede ignorar el Range header (responde 200) — se detecta y se resetea el estado.
+**Causa 2 (TUI congelado):** el handler de cola diferida llamaba `engine.download()` sin timeout. Un archivo que volvía a fallar podía mantener el hilo async bloqueado ~1050s (7 reintentos × 150s) con el TUI completamente sin retroalimentación.
+**Solución:** cola diferida envuelta en `asyncio.wait_for(timeout=600.0)`, con actualización del worker slot 0 como indicador visual y logging explícito del timeout.
+
+### 2026-03-29 — Workers desaparecen sin log tras implementar Range requests
+**Síntoma:** tras implementar Range requests, el usuario reporta que "seguimos como al inicio" — workers desaparecen del panel sin entradas de descarga exitosa en el log.
+**Diagnóstico (diag2.py — descarga completa de 5 MB):** el archivo se descargó en 1 solo request en 2.8s a 1813 KB/s. El CDN no truncó. El diagnóstico no reproducía el fallo.
+**Causa raíz:** bug crítico en el manejo de timeouts dentro de `_do_download`. Cuando el Range request para el segundo chunk (bytes=4MB-) sufría un stall:
+  1. `httpx.TimeoutException` se disparaba (stall_timeout=120s sin datos)
+  2. El handler hacía `chunks.clear(); resume_from = 0; full_size = 0` ← **se perdían los 4 MB del primer chunk**
+  3. El siguiente intento volvía a descargar desde 0 → mismo stall → mismo reset
+  4. Tras 5 ciclos (5×120s = 600s), el `asyncio.wait_for` del TUI agotaba el timeout
+  5. El archivo iba a la cola diferida (log: "⏸ diferido") — visible pero no como "completado"
+**Solución parte 1 (engine.py — preservar progreso en timeout):** se modificaron los handlers de `httpx.TimeoutException` y `httpx.RequestError`:
+  - `resume_from += chunk_received` (contabilizar bytes parciales recibidos antes del timeout)
+  - Si `resume_from > 0`: conservar `chunks` y `full_size`, reintentar el Range request desde la posición actual
+  - Solo si `resume_from == 0` (sin ningún dato): `chunks.clear(); full_size = 0` (inicio frío)
+  - Mismo tratamiento para el guard de 0 bytes en post-stream
+
+### 2026-03-29 — Workers desaparecen sin log (causa raíz definitiva)
+**Síntoma:** tras todos los fixes anteriores, workers siguen desapareciendo del panel sin entrada en el log.
+**Causa raíz:** bug de Python 3.12 + httpx HTTP/2. Cuando `asyncio.wait_for(timeout=600s)` dispara en el TUI:
+  1. `wait_for` cancela la tarea interna inyectando `CancelledError` con un mensaje específico
+  2. `CancelledError` se propaga hasta httpx, que hace cleanup del stream HTTP/2
+  3. Durante el cleanup, h2 (la librería HTTP/2 subyacente) puede re-crear la excepción como un nuevo `CancelledError` SIN el mensaje original
+  4. `wait_for` recibe el `CancelledError` "nuevo" (mensaje no coincide), asume que es una cancelación externa y lo re-lanza como `CancelledError` en lugar de `TimeoutError`
+  5. El worker captura `CancelledError` con `except asyncio.CancelledError: raise` — sale del bloque sin log ni `done()`
+  6. El worker muere silenciosamente, su tarea en `asyncio.gather` puede propagar la cancelación
+**Solución (engine.py + tui/app.py — timeout interno en el engine):**
+  - `download()` acepta nuevo parámetro `total_timeout: float | None`
+  - `_do_download` rastrea el tiempo con `asyncio.get_event_loop().time()` y chequea al inicio de cada iteración del loop
+  - Si `total_timeout` se excede, retorna `DownloadResult(error_kind=TIMEOUT)` de forma limpia — sin excepciones, sin CancelledError
+  - TUI pasa `total_timeout=570.0` (30s antes del límite de wait_for)
+  - `asyncio.wait_for` sube de 600s a 660s — solo actúa como safety net de último recurso
+  - El TUI recibe un `DownloadResult` normal → `error_kind in DEFERRABLE` → log "⏸ diferido" ✓
+**Impacto:** los workers ya no pueden desaparecer silenciosamente por la interacción Python 3.12 / httpx / wait_for.
+
+
 ### 2026-03-20 — file_count y last_synced nunca se actualizaban en la tabla de fuentes
 **Síntoma:** tras completar una descarga, la tabla de fuentes seguía mostrando 0 archivos y "Nunca" en última sync. El estado correcto aparecía solo al reiniciar la aplicación.
 **Causa:** `_do_download` no llamaba a `update_profile_url_sync` al terminar cada fuente.
@@ -1014,3 +1074,51 @@ en artistas con miles de posts.
 ### Commit
 `a8837ee` — feat: botón Actualizar — descarga incremental desde última sync
 - Flag `--dry-run` para ver el plan sin ejecutar
+
+---
+
+## 2026-03-29 — Fase 10: Estabilización de descargas Kemono — COMPLETA
+
+### Problema
+Descargas de kemono.cr fallaban sistemáticamente para archivos > 4 MB:
+throttling severo, progreso que se congela y desaparece del panel de workers sin dejar ninguna entrada en el log, archivos truncados.
+
+### Root causes encontrados y corregidos (en orden cronológico)
+
+**1. `Accept: text/css` en descarga de archivos (CDN 500)**
+El header DDG-bypass, necesario para el API, causaba HTTP 500 en el CDN de archivos.
+Se separaron `_CLIENT_HEADERS` (base) y `_DDG_ACCEPT` (solo para llamadas al API).
+
+**2. `_hash_from_path()` roto**
+Kemono cambió el formato de paths de `/data/ab/cd/hash/file` a `/ab/cd/hash/file`.
+La función no detectaba el nuevo formato y no extraía los hashes → dedup pre-descarga inutilizado.
+
+**3. Archivos truncados a 4 MB**
+El CDN sirve en chunks de exactamente 4 MB y cierra la conexión al terminar cada chunk.
+httpx interpreta el cierre como fin de stream — el engine guardaba el parcial como completo.
+Se implementaron Range requests: `_do_download` acumula chunks y continúa con `Range: bytes=N-`.
+
+**4. Timeout pierde progreso acumulado**
+Cuando el Range request del segundo chunk sufría stall (ReadTimeout):
+el handler hacía `chunks.clear(); resume_from = 0`, tirando los 4 MB ya descargados.
+Se corrigió: `resume_from += chunk_received`, solo resetear si `resume_from == 0`.
+
+**5. Workers desaparecen sin log (causa raíz definitiva)**
+Bug de interacción Python 3.12 + httpx HTTP/2 + `asyncio.wait_for`:
+- Python 3.12 usa un `cancel_message` interno para que `wait_for` identifique "su" `CancelledError`
+- httpx re-crea la excepción durante cleanup del stream HTTP/2, perdiendo el mensaje
+- `wait_for` ve un `CancelledError` "extraño", lo trata como cancelación externa y lo re-lanza
+- El worker `except asyncio.CancelledError: raise` lo captura → muere en silencio
+
+**Solución definitiva:** timeout interno en el engine.
+`download()` acepta `total_timeout: float | None`. `_do_download` chequea el tiempo
+al inicio de cada iteración del loop y retorna `DownloadResult(TIMEOUT)` de forma limpia,
+antes de que el `asyncio.wait_for` del TUI dispare. El TUI siempre recibe un resultado
+legítimo → log garantizado. `wait_for` subió a 660s como safety net.
+
+### Archivos modificados
+- `cherry_dl/engine.py` — separación DDG headers, Range requests, timeout interno, preservar chunks
+- `cherry_dl/templates/kemono.py` — `_hash_from_path()` para formato nuevo, Referer header
+- `cherry_dl/tui/app.py` — `total_timeout=570` en llamadas, `wait_for` a 660s
+
+### Verificado en producción: 2026-03-29 ✓

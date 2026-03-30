@@ -164,10 +164,14 @@ def _extract_files_from_post(post: dict, artist: ArtistInfo):
     Cada post puede tener:
       - file:        archivo principal (puede ser None)
       - attachments: lista de archivos adjuntos
+
+    Se incluye Referer apuntando a la página del creador para mejorar
+    el cache hit rate en el CDN de kemono.cr.
     """
     post_id = str(post.get("id", ""))
     post_title = post.get("title", "")
     date_published = post.get("published", "")
+    referer = {"Referer": artist.url}
 
     # Archivo principal del post
     main_file = post.get("file")
@@ -183,6 +187,7 @@ def _extract_files_from_post(post: dict, artist: ArtistInfo):
             post_title=post_title,
             date_published=date_published,
             remote_hash=_hash_from_path(path) or "",
+            extra_headers=referer,
         )
 
     # Archivos adjuntos
@@ -200,21 +205,32 @@ def _extract_files_from_post(post: dict, artist: ArtistInfo):
             post_title=post_title,
             date_published=date_published,
             remote_hash=_hash_from_path(path) or "",
+            extra_headers=referer,
         )
 
 
 def _hash_from_path(path: str) -> str | None:
     """
     Extrae el hash SHA-256 del path de kemono.
-    Estructura: /data/{2chars}/{2chars}/{sha256}/{filename}
+
+    Formato antiguo: /data/{2chars}/{2chars}/{sha256}/{filename}
+    Formato actual:  /{2chars}/{2chars}/{sha256}/{filename}
+
     Retorna el hash en minúsculas o None si el path no tiene esa estructura.
     """
     parts = [p for p in path.split("/") if p]
-    # Esperamos: ['data', 'ab', 'cd', '<sha256>', '<filename>']
+
     if len(parts) >= 4 and parts[0] == "data":
+        # Formato legado: ['data', 'ab', 'cd', sha256, filename]
         candidate = parts[3]
-        if len(candidate) == 64 and all(c in "0123456789abcdef" for c in candidate.lower()):
-            return candidate.lower()
+    elif len(parts) >= 3 and len(parts[0]) == 2 and len(parts[1]) == 2:
+        # Formato actual: ['ab', 'cd', sha256, filename]
+        candidate = parts[2]
+    else:
+        return None
+
+    if len(candidate) == 64 and all(c in "0123456789abcdef" for c in candidate.lower()):
+        return candidate.lower()
     return None
 
 
