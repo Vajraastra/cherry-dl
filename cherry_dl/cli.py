@@ -499,6 +499,114 @@ async def _migrate_structure(dry_run: bool) -> None:
 
 
 # ════════════════════════════════════════════════════════════════════════════════
+# MIGRATE-PENDING
+# ════════════════════════════════════════════════════════════════════════════════
+
+@app.command()
+def migrate_pending(
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Muestra qué catálogos se migrarían sin tocarlos"
+    ),
+):
+    """
+    Inicializa la tabla pending_queue en todos los catálogos existentes.
+
+    Necesario una sola vez al actualizar cherry-dl a la versión con mapa
+    persistente de descargas. Es seguro correrlo múltiples veces.
+    """
+    run(_migrate_pending(dry_run))
+
+
+async def _migrate_pending(dry_run: bool) -> None:
+    import aiosqlite
+    from .config import load_config, ensure_dirs, INDEX_DB
+    from .index import init_index, list_profiles
+    from .catalog import init_catalog, CATALOG_NAME
+
+    config = load_config()
+    ensure_dirs(config)
+    await init_index(INDEX_DB)
+
+    profiles = await list_profiles(INDEX_DB)
+    if not profiles:
+        console.print("[yellow]No hay perfiles en el índice.[/]")
+        return
+
+    table = Table(
+        title="Migración de catálogos — pending_queue",
+        show_lines=False,
+    )
+    table.add_column("Perfil", style="bold")
+    table.add_column("Catálogo", style="dim", overflow="fold")
+    table.add_column("Estado", justify="center")
+
+    ok = skipped = already = errors = 0
+
+    for p in profiles:
+        folder  = Path(p["folder_path"])
+        db_path = folder / CATALOG_NAME
+        name    = p["display_name"]
+
+        if not db_path.exists():
+            table.add_row(name, str(db_path), "[yellow]sin catálogo[/]")
+            skipped += 1
+            continue
+
+        # Verificar si pending_queue ya existe
+        try:
+            async with aiosqlite.connect(db_path) as db:
+                async with db.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type='table' AND name='pending_queue'"
+                ) as cur:
+                    exists = await cur.fetchone() is not None
+        except Exception as exc:
+            table.add_row(name, str(db_path), f"[red]error al leer: {exc}[/]")
+            errors += 1
+            continue
+
+        if exists:
+            table.add_row(name, str(db_path), "[dim]ya migrado[/]")
+            already += 1
+            continue
+
+        if dry_run:
+            table.add_row(name, str(db_path), "[cyan]pendiente[/]")
+            ok += 1
+            continue
+
+        # Aplicar migración
+        try:
+            await init_catalog(folder)
+            table.add_row(name, str(db_path), "[green]✓ migrado[/]")
+            ok += 1
+        except Exception as exc:
+            table.add_row(name, str(db_path), f"[red]✗ {exc}[/]")
+            errors += 1
+
+    console.print(table)
+    console.print()
+
+    if dry_run:
+        console.print(
+            f"[yellow]--dry-run:[/] {ok} catálogo(s) por migrar, "
+            f"{already} ya migrados, {skipped} sin catálogo."
+        )
+        console.print(
+            "  Corre sin --dry-run para aplicar."
+        )
+        return
+
+    console.print("[bold green]✓ Migración completa[/]")
+    console.print(f"  Migrados:    [green]{ok}[/]")
+    console.print(f"  Ya tenían:   [dim]{already}[/]")
+    if skipped:
+        console.print(f"  Sin catálogo: [yellow]{skipped}[/]")
+    if errors:
+        console.print(f"  Errores:     [red]{errors}[/red]")
+
+
+# ════════════════════════════════════════════════════════════════════════════════
 # COMPACT
 # ════════════════════════════════════════════════════════════════════════════════
 

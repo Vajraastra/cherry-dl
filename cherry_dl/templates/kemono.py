@@ -49,8 +49,11 @@ _PAGE_SIZE = 50  # Kemono retorna 50 posts por página
 class KemonoTemplate(SiteTemplate):
     name = "kemono"
     base_url = _BASE
-    workers = 3                  # Conservador — kemono tiene rate limits agresivos
+    workers = 2                  # >2 workers activa rate limiting agresivo en Kemono
     provides_file_hashes = True  # Kemono expone SHA-256 en el path del CDN
+    scan_page_delay = 1.0        # 1 s entre páginas de API — evita burst de cientos de GETs
+    cooldown_threshold = 100     # si >100 URLs nuevas → enfriamiento antes de descargar
+    cooldown_seconds = 60.0      # enfriamiento post-scan agresivo — 60s para que Kemono olvide el burst
 
     # ── Detección ──────────────────────────────────────────────────────────────
 
@@ -133,6 +136,13 @@ class KemonoTemplate(SiteTemplate):
                 f"{_BASE}/api/v1/{service}/user/{creator_id}"
                 f"/posts?o={offset}"
             )
+
+            # Delay configurable entre páginas — evita el burst de cientos de
+            # micro-requests que activa las protecciones de Kemono antes de
+            # que empiecen las descargas reales.
+            if self.scan_page_delay > 0:
+                import asyncio as _asyncio
+                await _asyncio.sleep(self.scan_page_delay)
 
             try:
                 posts = await self.engine.get_json(url)

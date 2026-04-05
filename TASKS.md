@@ -199,6 +199,30 @@ La compactación es puramente de organización (numeración sin huecos).
 
 ---
 
+### Fase 11 — Detección de duplicados + comparación por hash: COMPLETA ✓ (2026-04-04)
+- [x] Bug fix: `pending_count()` faltaba `await` en `_do_check_all` (coroutine vs int)
+- [x] Bug fix: `_do_check_all` refactorizado para llamar `_load_profiles()` en vez de `update_cell_at` (markup en celdas impedía matching por contenido)
+- [x] `catalog.py`: `compare_catalogs(folder_a, folder_b)` — compara hashes SHA-256 entre dos catalog.db
+- [x] `index.py`: `merge_profiles(db_path, keep_id, remove_id)` — fusiona URLs de un perfil en otro
+- [x] `tui/app.py`: columna "Estado" en tabla de perfiles (⏳ N / ✓ / ○ Sin sync / ?)
+- [x] `tui/app.py`: botón "⊗ Comparar" + flujo SelectProfileModal → CompareResultModal → MergeConfirmModal
+- [x] `tui/app.py`: botón "⟳ Chequear Todo" — refresca columna Estado sin descargar nada
+- [x] `tui/app.py`: `_name_similarity()` con difflib + chequeo automático en NewProfileModal al resolver URL (umbral 0.80)
+
+### Fase 10b — Migración de perfiles existentes: COMPLETA ✓ (2026-04-04)
+- [x] `cli.py`: comando `cherry-dl migrate-pending` — inicializa pending_queue en todos los catalog.db existentes, con `--dry-run`
+- [x] `tui/app.py`: `_do_download` unifica `url_since` — usa `last_synced` como frontera por defecto en "Descargar" Y "Actualizar" (evita re-scan completo para perfiles existentes)
+- [x] `tui/app.py`: botón "↺ Rescan" — llama `_do_download(force_full=True)`, ignora `last_synced`, escanea desde el inicio
+- [x] `tui/app.py`: "↺ Rescan" integrado en `_set_busy` (se deshabilita durante operaciones)
+
+### Fase 10 — Mapa persistente + politeness layer: COMPLETA ✓ (2026-04-04)
+- [x] `catalog.py`: tabla `pending_queue` + índice `profile_url_id` + migración en `init_catalog`
+- [x] `catalog.py`: `add_pending`, `pending_url_exists`, `pending_count`, `get_pending_files`, `remove_pending`
+- [x] `base.py`: `scan_page_delay`, `cooldown_threshold`, `cooldown_seconds` en `SiteTemplate`
+- [x] `kemono.py`: `workers=2`, `scan_page_delay=1.0`, `cooldown_threshold=100`, delay en `iter_files`
+- [x] `tui/app.py`: `_do_download` en dos fases (scan→pending_queue → cooldown → descargar desde cola)
+- [x] `tui/app.py`: `remove_pending` en todos los puntos de éxito/skip del `worker_task`
+
 ### Features
 - [ ] Verificación periódica automática (scheduler interno)
 - [ ] Exportar índice a CSV/JSON

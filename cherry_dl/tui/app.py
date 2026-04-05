@@ -34,7 +34,12 @@ from textual.widgets import (
     Static,
 )
 
-from ..catalog import add_file, get_stats, hash_exists, init_catalog, next_counter, url_exists
+from ..catalog import (
+    add_file, add_pending, compare_catalogs, get_all_files,
+    get_meta_int, get_pending_files, get_stats,
+    hash_exists, init_catalog, next_counter,
+    pending_count, pending_url_exists, remove_pending, set_meta_int, url_exists,
+)
 from ..config import INDEX_DB, load_config, save_config
 from ..index import (
     add_profile_url,
@@ -43,6 +48,7 @@ from ..index import (
     get_profile,
     init_index,
     list_profiles,
+    merge_profiles,
     set_profile_url_enabled,
     update_profile_ext_filter,
     update_profile_last_checked,
@@ -95,6 +101,23 @@ class ClipInput(Input):
     def action_paste(self) -> None:
         """Ctrl+V procesado por Textual — leer del portapapeles del sistema."""
         self._insert(_read_clipboard())
+
+
+# ── Helpers de similitud de nombres ─────────────────────────────────────────
+
+def _normalize_name(name: str) -> str:
+    """Normaliza un nombre para comparación: lowercase, solo alfanumérico."""
+    import re
+    return re.sub(r"[^a-z0-9]", "", name.lower())
+
+
+def _name_similarity(a: str, b: str) -> float:
+    """Ratio de similitud (0–1) entre dos nombres, ignorando capitalización y símbolos."""
+    from difflib import SequenceMatcher
+    na, nb = _normalize_name(a), _normalize_name(b)
+    if not na or not nb:
+        return 0.0
+    return SequenceMatcher(None, na, nb).ratio()
 
 
 # ── Helpers de formato ──────────────────────────────────────────────────────
@@ -348,6 +371,20 @@ class NewProfileModal(ModalScreen[dict | None]):
             if not name_inp.value.strip():
                 name_inp.value = self._artist_info.name
             self._auto_folder()
+
+            # Chequeo de duplicados por similitud de nombre (Levenshtein)
+            resolved_name = self._artist_info.name
+            profiles = await list_profiles(INDEX_DB)
+            for p in profiles:
+                if _name_similarity(_normalize_name(resolved_name),
+                                    _normalize_name(p["display_name"])) >= 0.80:
+                    self.app.notify(
+                        f'⚠ Nombre similar al perfil existente: "{p["display_name"]}"\n'
+                        "Revisa si ya existe este artista antes de continuar.",
+                        severity="warning",
+                        timeout=8,
+                    )
+                    break
         except NeedsManualAuth:
             lbl.update("[yellow]⚠ Se requiere autenticación con Patreon[/]")
             ok = await self.app.push_screen_wait(PatreonAuthModal())
@@ -593,29 +630,34 @@ class ProfilesScreen(Screen):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         with Horizontal(id="profiles-toolbar"):
-            yield Button("+ Nuevo",    id="btn-new",     classes="-primary")
-            yield Button("⟳ Refresh",  id="btn-refresh")
-            yield Button("⌫ Eliminar", id="btn-delete",  classes="-danger")
-            yield Button("⚙ Config",   id="btn-settings")
+            yield Button("+ Nuevo",        id="btn-new",       classes="-primary")
+            yield Button("⟳ Refresh",      id="btn-refresh")
+            yield Button("⌫ Eliminar",     id="btn-delete",    classes="-danger")
+            yield Button("⊗ Comparar",     id="btn-compare")
+            yield Button("⟳ Chequear Todo", id="btn-check-all")
+            yield Button("⚙ Config",       id="btn-settings")
         yield Label("  PERFILES", classes="section-label")
         yield DataTable(id="profiles-table", cursor_type="row")
         yield Footer()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         match event.button.id:
-            case "btn-new":      self.action_new_profile()
-            case "btn-refresh":  self.action_refresh()
-            case "btn-delete":   self.action_delete_profile()
-            case "btn-settings": self.action_settings()
+            case "btn-new":       self.action_new_profile()
+            case "btn-refresh":   self.action_refresh()
+            case "btn-delete":    self.action_delete_profile()
+            case "btn-compare":   self.action_compare_profiles()
+            case "btn-check-all": self.action_check_all()
+            case "btn-settings":  self.action_settings()
 
     def on_mount(self) -> None:
         tbl = self.query_one("#profiles-table", DataTable)
         tbl.add_column("#",           width=4)
-        tbl.add_column("Nombre",      width=28)
+        tbl.add_column("Nombre",      width=25)
         tbl.add_column("Sitio",       width=10)
         tbl.add_column("Archivos",    width=10)
+        tbl.add_column("Estado",      width=12)
         tbl.add_column("Última sync", width=14)
-        tbl.add_column("Carpeta",     width=40)
+        tbl.add_column("Carpeta",     width=36)
         self.run_worker(self._load_profiles(), exclusive=True)
 
     async def _load_profiles(self) -> None:
@@ -627,11 +669,25 @@ class ProfilesScreen(Screen):
                 folder = Path(p["folder_path"])
                 stats  = await get_stats(folder) if folder.exists() else {"total": 0}
                 last   = (p.get("last_checked") or "Nunca")[:10]
+
+                # Indicador de estado basado en pending_queue
+                if not folder.exists():
+                    estado = "[dim]?[/]"
+                else:
+                    n_pending = await pending_count(folder)
+                    if n_pending > 0:
+                        estado = f"[yellow]⏳ {n_pending}[/]"
+                    elif p.get("last_checked"):
+                        estado = "[green]✓[/]"
+                    else:
+                        estado = "[dim]○ Sin sync[/]"
+
                 tbl.add_row(
                     str(p["id"]),
                     p["display_name"],
                     p["primary_site"].upper(),
                     str(stats["total"]),
+                    estado,
                     last,
                     str(folder),
                     key=str(p["id"]),
@@ -708,6 +764,83 @@ class ProfilesScreen(Screen):
         except Exception as exc:
             self.app.notify(f"Error al eliminar: {exc}", severity="error")
 
+    # ── Comparar perfiles ──────────────────────────────────────────────────────
+
+    def action_compare_profiles(self) -> None:
+        tbl = self.query_one("#profiles-table", DataTable)
+        if tbl.cursor_row is None:
+            self.app.notify("Selecciona un perfil primero", severity="warning")
+            return
+        row = tbl.get_row_at(tbl.cursor_row)
+        profile_a_id = int(row[0])
+        self.app.push_screen(
+            SelectProfileModal(exclude_id=profile_a_id),
+            lambda pid: self.run_worker(
+                self._do_compare(profile_a_id, pid), exclusive=False
+            ) if pid is not None else None,
+        )
+
+    async def _do_compare(self, id_a: int, id_b: int) -> None:
+        try:
+            prof_a = await get_profile(INDEX_DB, id_a)
+            prof_b = await get_profile(INDEX_DB, id_b)
+            if not prof_a or not prof_b:
+                self.app.notify("No se encontraron ambos perfiles", severity="error")
+                return
+            folder_a = Path(prof_a["folder_path"])
+            folder_b = Path(prof_b["folder_path"])
+            result = compare_catalogs(folder_a, folder_b)
+            self.app.push_screen(
+                CompareResultModal(
+                    prof_a=prof_a,
+                    prof_b=prof_b,
+                    stats=result,
+                ),
+                lambda merge: self.run_worker(
+                    self._do_merge(id_a, id_b), exclusive=False
+                ) if merge else None,
+            )
+        except Exception as exc:
+            self.app.notify(f"Error al comparar: {exc}", severity="error")
+
+    async def _do_merge(self, keep_id: int, remove_id: int) -> None:
+        self.app.push_screen(
+            MergeConfirmModal(),
+            lambda confirmed: self.run_worker(
+                self._execute_merge(keep_id, remove_id), exclusive=False
+            ) if confirmed else None,
+        )
+
+    async def _execute_merge(self, keep_id: int, remove_id: int) -> None:
+        try:
+            moved = await merge_profiles(INDEX_DB, keep_id, remove_id)
+            self.app.notify(
+                f"Fusión completada — {moved} URL(s) reasignadas", severity="information"
+            )
+            await self._load_profiles()
+        except Exception as exc:
+            self.app.notify(f"Error al fusionar: {exc}", severity="error")
+
+    # ── Chequear todo ──────────────────────────────────────────────────────────
+
+    def action_check_all(self) -> None:
+        self.run_worker(self._do_check_all(), exclusive=True, group="check-all")
+
+    async def _do_check_all(self) -> None:
+        """
+        Recarga la tabla de perfiles completa, recalculando el estado de
+        pending_queue para cada perfil. No descarga nada.
+        """
+        try:
+            profiles = await list_profiles(INDEX_DB)
+            self.app.notify(
+                f"Chequeando {len(profiles)} perfil(es)…", severity="information"
+            )
+            await self._load_profiles()
+            self.app.notify("Estado actualizado", severity="information")
+        except Exception as exc:
+            self.app.notify(f"Error al chequear: {exc}", severity="error")
+
     def action_settings(self) -> None:
         self.app.push_screen(SettingsScreen())
 
@@ -774,6 +907,211 @@ class CompactConfirmModal(ModalScreen):
         self.dismiss(event.button.id == "btn-compact-ok")
 
 
+# ── SelectProfileModal ───────────────────────────────────────────────────────
+
+class SelectProfileModal(ModalScreen):
+    """
+    Muestra la lista de perfiles para seleccionar el perfil B en una comparación.
+    Retorna el profile_id seleccionado, o None si se cancela.
+    """
+
+    DEFAULT_CSS = """
+    SelectProfileModal > Vertical {
+        width: 60;
+        height: auto;
+        max-height: 30;
+        border: solid $primary;
+        background: $surface;
+        padding: 1 2;
+    }
+    SelectProfileModal Label#spm-title {
+        text-style: bold;
+        margin-bottom: 1;
+    }
+    SelectProfileModal DataTable {
+        height: 15;
+        margin-bottom: 1;
+    }
+    SelectProfileModal Horizontal {
+        height: 3;
+        align: center middle;
+    }
+    """
+
+    def __init__(self, exclude_id: int) -> None:
+        super().__init__()
+        self._exclude_id = exclude_id
+        self._profiles: list[dict] = []
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Label("Selecciona el perfil B para comparar", id="spm-title")
+            yield DataTable(id="spm-table", cursor_type="row", zebra_stripes=True)
+            with Horizontal():
+                yield Button("Cancelar", id="btn-spm-cancel", variant="default")
+                yield Button("Seleccionar", id="btn-spm-ok", variant="primary")
+
+    async def on_mount(self) -> None:
+        tbl = self.query_one("#spm-table", DataTable)
+        tbl.add_columns("ID", "Nombre", "Carpeta")
+        self._profiles = await list_profiles(INDEX_DB)
+        for p in self._profiles:
+            if p["id"] == self._exclude_id:
+                continue
+            tbl.add_row(
+                str(p["id"]),
+                p["display_name"],
+                p["folder_path"] or "",
+            )
+        self.query_one("#btn-spm-cancel", Button).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-spm-cancel":
+            self.dismiss(None)
+        elif event.button.id == "btn-spm-ok":
+            tbl = self.query_one("#spm-table", DataTable)
+            if tbl.cursor_row is not None:
+                row = tbl.get_row_at(tbl.cursor_row)
+                self.dismiss(int(row[0]))
+            else:
+                self.app.notify("Selecciona un perfil de la lista", severity="warning")
+
+    def on_data_table_row_selected(self, _: DataTable.RowSelected) -> None:
+        tbl = self.query_one("#spm-table", DataTable)
+        if tbl.cursor_row is not None:
+            row = tbl.get_row_at(tbl.cursor_row)
+            self.dismiss(int(row[0]))
+
+
+# ── CompareResultModal ───────────────────────────────────────────────────────
+
+class CompareResultModal(ModalScreen):
+    """
+    Muestra el resultado de la comparación de hashes entre dos perfiles.
+    Retorna True si el usuario quiere fusionar, False si no.
+    """
+
+    DEFAULT_CSS = """
+    CompareResultModal > Vertical {
+        width: 65;
+        height: auto;
+        border: solid $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+    CompareResultModal Label#crm-title {
+        text-style: bold;
+        margin-bottom: 1;
+    }
+    CompareResultModal Label#crm-stats {
+        margin-bottom: 1;
+    }
+    CompareResultModal Label#crm-merge-hint {
+        color: $warning;
+        margin-bottom: 1;
+    }
+    CompareResultModal Horizontal {
+        height: 3;
+        align: center middle;
+    }
+    """
+
+    def __init__(self, prof_a: dict, prof_b: dict, stats: dict) -> None:
+        super().__init__()
+        self._prof_a = prof_a
+        self._prof_b = prof_b
+        self._stats  = stats
+
+    def compose(self) -> ComposeResult:
+        s      = self._stats
+        name_a = self._prof_a["display_name"]
+        name_b = self._prof_b["display_name"]
+        pct    = f"{s['coverage'] * 100:.1f}%" if s.get("coverage") is not None else "N/A"
+        unique = s.get("unique_to_b", 0)
+
+        hint = ""
+        if s.get("coverage", 0) >= 0.80:
+            hint = (
+                f"[bold yellow]⚠ {pct} de B existe en A — "
+                "posibles perfiles duplicados.[/bold yellow]\n"
+                "Puedes fusionar B en A (B se eliminará)."
+            )
+        elif s.get("matches", 0) > 0:
+            hint = f"[dim]{pct} de coincidencia — no se recomienda fusionar.[/dim]"
+        else:
+            hint = "[dim]Sin archivos en común.[/dim]"
+
+        with Vertical():
+            yield Label("⊗ Resultado de comparación", id="crm-title")
+            yield Label(
+                f"[bold]A:[/bold] {name_a}  ({s.get('total_a', 0)} archivos)\n"
+                f"[bold]B:[/bold] {name_b}  ({s.get('total_b', 0)} archivos)\n"
+                f"Coincidencias (hash): [bold]{s.get('matches', 0)}[/bold]  "
+                f"({pct} de B)  |  Exclusivos en B: {unique}",
+                id="crm-stats",
+                markup=True,
+            )
+            yield Label(hint, id="crm-merge-hint", markup=True)
+            with Horizontal():
+                yield Button("Cerrar",            id="btn-crm-close",  variant="default")
+                yield Button("Fusionar B → A",    id="btn-crm-merge",  variant="warning")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "btn-crm-merge")
+
+
+# ── MergeConfirmModal ────────────────────────────────────────────────────────
+
+class MergeConfirmModal(ModalScreen):
+    """
+    Confirmación final antes de ejecutar la fusión de perfiles.
+    Retorna True si el usuario confirma.
+    """
+
+    DEFAULT_CSS = """
+    MergeConfirmModal > Vertical {
+        width: 60;
+        height: auto;
+        border: solid $error;
+        background: $surface;
+        padding: 1 2;
+    }
+    MergeConfirmModal Label#mcm-title {
+        color: $error;
+        text-style: bold;
+        margin-bottom: 1;
+    }
+    MergeConfirmModal Label#mcm-body {
+        margin-bottom: 1;
+    }
+    MergeConfirmModal Horizontal {
+        height: 3;
+        align: center middle;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Label("⚠ Confirmar fusión", id="mcm-title")
+            yield Label(
+                "El perfil B será eliminado del índice.\n"
+                "Sus URLs se reasignarán al perfil A.\n\n"
+                "[bold]Los archivos en disco NO se mueven.[/bold]\n"
+                "Esta acción no se puede deshacer.",
+                id="mcm-body",
+                markup=True,
+            )
+            with Horizontal():
+                yield Button("Cancelar",  id="btn-mcm-cancel", variant="default")
+                yield Button("Confirmar", id="btn-mcm-ok",     variant="error")
+
+    def on_mount(self) -> None:
+        self.query_one("#btn-mcm-cancel", Button).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "btn-mcm-ok")
+
+
 # ── ArtistScreen ────────────────────────────────────────────────────────────
 
 class ArtistScreen(Screen):
@@ -792,6 +1130,11 @@ class ArtistScreen(Screen):
         self._profile: dict | None = None
         self._worker_rows: list[WorkerRow] = []
         self._is_busy      = False
+        # Progreso total de la sesión de descarga activa.
+        # _batch_total  — archivos en la cola al iniciar (scan nuevo + resume)
+        # _batch_offset — archivos completados en sesiones anteriores del mismo batch
+        self._batch_total:  int = 0
+        self._batch_offset: int = 0
 
     # ── Compose ──────────────────────────────────────────────────────────
 
@@ -829,6 +1172,7 @@ class ArtistScreen(Screen):
             yield Button("⟳ Verificar",  id="btn-verify")
             yield Button("↑ Actualizar", id="btn-update")
             yield Button("▶ Descargar",  id="btn-download", classes="-primary")
+            yield Button("↺ Rescan",     id="btn-rescan")
             yield Button("✕ Cancelar",   id="btn-cancel",   classes="-danger")
 
         # Panel de workers
@@ -932,6 +1276,8 @@ class ArtistScreen(Screen):
             self.action_start_download()
         elif btn_id == "btn-update":
             self.action_start_update()
+        elif btn_id == "btn-rescan":
+            self.action_start_rescan()
         elif btn_id == "btn-cancel":
             self.action_cancel_download()
         elif btn_id == "btn-verify":
@@ -1009,6 +1355,12 @@ class ArtistScreen(Screen):
             return
         self._run_download(update_only=True)
 
+    def action_start_rescan(self) -> None:
+        """Rescan completo desde el inicio — ignora last_synced."""
+        if self._is_busy or not self._profile:
+            return
+        self._run_download(force_full=True)
+
     def action_cancel_download(self) -> None:
         self.workers.cancel_group(self, "download")
 
@@ -1036,14 +1388,21 @@ class ArtistScreen(Screen):
         sem.set_classes(cls)
 
     def _update_counters(self, dl: int, sk: int, err: int, def_: int) -> None:
+        # Progreso de descarga: "X de N" si hay total conocido, solo "X" si no
+        total = self._batch_total
+        if total > 0:
+            done = self._batch_offset + dl
+            dl_str = f"↓ {done} / {total}"
+        else:
+            dl_str = f"↓ {dl}"
         self.query_one("#counters-label", Static).update(
-            f"↓ {dl}  skip {sk}  ✗ {err}  ⏭ {def_}"
+            f"{dl_str}  skip {sk}  ✗ {err}  ⏭ {def_}"
         )
 
     def _set_busy(self, busy: bool) -> None:
         self._is_busy = busy
         for btn_id in (
-            "btn-download", "btn-update", "btn-verify", "btn-prescan",
+            "btn-download", "btn-update", "btn-rescan", "btn-verify", "btn-prescan",
             "btn-dedup", "btn-compact",
             "btn-add-url", "btn-del-url",
         ):
@@ -1073,11 +1432,13 @@ class ArtistScreen(Screen):
     # ── Download ──────────────────────────────────────────────────────────
 
     @work(exclusive=True, group="download")
-    async def _run_download(self, update_only: bool = False) -> None:
+    async def _run_download(
+        self, update_only: bool = False, force_full: bool = False
+    ) -> None:
         self._set_busy(True)
         self.query_one("#activity-log", RichLog).clear()
         try:
-            await self._do_download(update_only=update_only)
+            await self._do_download(update_only=update_only, force_full=force_full)
         except asyncio.CancelledError:
             self._log("[yellow]Descarga cancelada por el usuario.[/]")
             self._set_semaphore("cancelled")
@@ -1087,7 +1448,9 @@ class ArtistScreen(Screen):
         finally:
             self._set_busy(False)
 
-    async def _do_download(self, update_only: bool = False) -> None:
+    async def _do_download(
+        self, update_only: bool = False, force_full: bool = False
+    ) -> None:
         from datetime import datetime
 
         from ..engine import DownloadEngine, ErrorKind
@@ -1190,34 +1553,183 @@ class ArtistScreen(Screen):
                     INDEX_DB, pu["id"], artist_id=artist_info.artist_id
                 )
 
-                # Calcular fecha de corte para "Actualizar"
+                # Calcular fecha de corte.
+                # Si last_synced existe Y no es un Rescan forzado, se usa como
+                # frontera en ambos modos (Descargar + Actualizar). Esto evita
+                # re-escanear cientos de páginas de API para perfiles que ya
+                # tienen una sincronización previa. "↺ Rescan" usa force_full=True
+                # para ignorar la frontera y escanear desde el inicio.
                 url_since: datetime | None = None
-                if update_only and pu.get("last_synced"):
+                if not force_full and pu.get("last_synced"):
                     url_since = parse_date_utc(pu["last_synced"])
                     if url_since:
+                        label = "↑" if update_only else "⟳"
                         self._log(
-                            f"  [dim]↑ Actualizar desde {pu['last_synced'][:16]}[/]"
+                            f"  [dim]{label} Sync desde {pu['last_synced'][:16]}[/]"
                         )
+                elif force_full:
+                    self._log("  [dim]↺ Rescan completo desde el inicio…[/]")
 
                 dl_before    = downloaded_ref[0]
                 local_hashes = await _build_local_hash_map(folder)
-                file_queue: asyncio.Queue = asyncio.Queue(maxsize=workers * 3)
-                seen_urls: set[str] = set()
 
-                async def producer() -> None:
+                # ── Fase 1: scan o retomar pendientes ─────────────────────
+                # Si ya hay archivos pendientes de una sesión anterior (p.ej.
+                # el proceso se interrumpió a mitad de descarga), se retoman
+                # directamente sin re-escanear la API del servidor.
+                import json as _json
+                pu_id: int | None = pu.get("id")
+                existing_pending = await pending_count(folder, pu_id)
+                new_this_scan = 0
+
+                if existing_pending > 0:
+                    self._log(
+                        f"  [cyan]↺ Retomando — "
+                        f"{existing_pending} archivo(s) pendiente(s)[/]"
+                    )
+                else:
+                    # Scan de la API: poblar pending_queue antes de descargar.
+                    # El delay entre páginas (scan_page_delay) evita el burst
+                    # que activa las protecciones del servidor.
+                    self._log(f"  [dim]Escaneando posts…[/]")
+                    seen_scan: set[str] = set()
                     try:
                         async for fi in template.iter_files(
                             artist_info, since=url_since
                         ):
-                            if not _passes_ext_filter(fi.filename, ext_filter, not ext_filter):
-                                skipped_ref[0] += 1
-                                self._log(f"  [dim]— {fi.filename[:60]}  [filtro ext][/]")
-                                continue
-                            if fi.url in seen_urls:
+                            if not _passes_ext_filter(
+                                fi.filename, ext_filter, not ext_filter
+                            ):
                                 skipped_ref[0] += 1
                                 continue
-                            seen_urls.add(fi.url)
-                            await asyncio.wait_for(file_queue.put(fi), timeout=120.0)
+                            key = fi.dedup_key
+                            if key in seen_scan:
+                                continue
+                            seen_scan.add(key)
+                            # Saltar si ya está en el catálogo de archivos
+                            if await url_exists(folder, key):
+                                continue
+                            if fi.remote_hash and await hash_exists(
+                                folder, fi.remote_hash
+                            ):
+                                continue
+                            # Agregar a cola persistente si no está ya
+                            if not await pending_url_exists(folder, key):
+                                await add_pending(
+                                    folder,
+                                    url_source=key,
+                                    download_url=fi.url,
+                                    filename_hint=fi.filename,
+                                    post_id=fi.post_id,
+                                    post_published=fi.date_published,
+                                    remote_hash=fi.remote_hash,
+                                    extra_headers=(
+                                        _json.dumps(fi.extra_headers)
+                                        if fi.extra_headers else None
+                                    ),
+                                    profile_url_id=pu_id,
+                                )
+                                new_this_scan += 1
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as _scan_exc:
+                        import traceback as _tb2
+                        self._log(
+                            f"\n[bold red]✗ Error en escaneo "
+                            f"({type(_scan_exc).__name__}): {_scan_exc}[/]"
+                        )
+                        self._log(
+                            f"  [dim]{_tb2.format_exc().splitlines()[-1]}[/]"
+                        )
+                        self._log(
+                            "[yellow]⚠ Scan parcial — usa Sync para continuar.[/]"
+                        )
+
+                    self._log(f"  [dim]Scan: {new_this_scan} nuevo(s) en cola[/]")
+
+                    # Enfriamiento post-scan: si el scan fue agresivo (muchas
+                    # páginas de API), esperar antes de iniciar las descargas
+                    # para que las protecciones del servidor se reseteen.
+                    _threshold = getattr(template, "cooldown_threshold", 200)
+                    _cooldown  = getattr(template, "cooldown_seconds", 10.0)
+                    if new_this_scan >= _threshold:
+                        self._log(
+                            f"  [yellow]⏸ Enfriamiento {_cooldown:.0f}s "
+                            f"antes de iniciar descargas…[/]"
+                        )
+                        await asyncio.sleep(_cooldown)
+
+                # ── Fase 2: descargar desde la cola persistida ────────────
+                pending_list = await get_pending_files(folder, pu_id)
+                if not pending_list:
+                    self._log("  [green]✓ Sin archivos nuevos[/]")
+                    self._batch_total  = 0
+                    self._batch_offset = 0
+                    await update_profile_url_sync(
+                        INDEX_DB, pu["id"],
+                        file_count=pu.get("file_count") or 0,
+                    )
+                    continue
+
+                # Calcular progreso total "X / N" para el contador de UI.
+                # Batch nuevo → guardar total en meta para que futuros resumes
+                # sepan cuántos archivos había originalmente.
+                # Resume → leer el total guardado y calcular el offset.
+                _batch_key = f"pending_batch_{pu_id}"
+                if existing_pending == 0:
+                    _batch_total  = len(pending_list)
+                    _batch_offset = 0
+                    await set_meta_int(folder, _batch_key, _batch_total)
+                else:
+                    _stored = await get_meta_int(folder, _batch_key)
+                    if _stored and _stored >= len(pending_list):
+                        _batch_total  = _stored
+                        _batch_offset = _stored - len(pending_list)
+                    else:
+                        _batch_total  = len(pending_list)
+                        _batch_offset = 0
+
+                self._batch_total  = _batch_total
+                self._batch_offset = _batch_offset
+
+                _resume_note = (
+                    f"  — retomando desde [cyan]{_batch_offset} / {_batch_total}[/]"
+                    if _batch_offset > 0 else ""
+                )
+                self._log(
+                    f"  Descargando [bold]{len(pending_list)}[/] archivo(s)"
+                    f"{_resume_note}"
+                )
+
+                file_queue: asyncio.Queue = asyncio.Queue(maxsize=workers * 3)
+
+                async def producer() -> None:
+                    """Alimenta la cola de workers desde la lista de pendientes."""
+                    from ..templates.base import FileInfo as _FI
+                    try:
+                        for _pf in pending_list:
+                            _extra: dict = {}
+                            if _pf.get("extra_headers"):
+                                try:
+                                    _extra = _json.loads(_pf["extra_headers"])
+                                except Exception:
+                                    pass
+                            _fi = _FI(
+                                url=_pf["download_url"],
+                                url_source=_pf["url_source"],
+                                filename=_pf["filename_hint"],
+                                artist_id=artist_info.artist_id,
+                                artist_name=artist_info.name,
+                                post_id=_pf.get("post_id") or "",
+                                date_published=_pf.get("post_published") or "",
+                                remote_hash=_pf.get("remote_hash") or "",
+                                extra_headers=_extra,
+                            )
+                            await asyncio.wait_for(
+                                file_queue.put(_fi), timeout=120.0
+                            )
+                    except asyncio.CancelledError:
+                        raise
                     finally:
                         for _ in range(workers):
                             try:
@@ -1251,6 +1763,7 @@ class ArtistScreen(Screen):
                             if await url_exists(folder, fi.dedup_key):
                                 skipped_ref[0] += 1
                                 self._log(f"  [dim]— {fi.filename[:60]}  [URL en catálogo][/]")
+                                await remove_pending(folder, fi.dedup_key)
                                 self._update_counters(
                                     downloaded_ref[0], skipped_ref[0],
                                     errors_ref[0], deferred_count_ref[0],
@@ -1260,6 +1773,7 @@ class ArtistScreen(Screen):
                             if fi.remote_hash and await hash_exists(folder, fi.remote_hash):
                                 skipped_ref[0] += 1
                                 self._log(f"  [dim]— {fi.filename[:60]}  [hash en catálogo][/]")
+                                await remove_pending(folder, fi.dedup_key)
                                 self._update_counters(
                                     downloaded_ref[0], skipped_ref[0],
                                     errors_ref[0], deferred_count_ref[0],
@@ -1346,6 +1860,7 @@ class ArtistScreen(Screen):
                                 self._log(
                                     f"  [dim]≡ {fi.filename[:60]}  [duplicado — hash ya catalogado][/]"
                                 )
+                                await remove_pending(folder, fi.dedup_key)
                                 self._update_counters(
                                     downloaded_ref[0], skipped_ref[0],
                                     errors_ref[0], deferred_count_ref[0],
@@ -1377,6 +1892,7 @@ class ArtistScreen(Screen):
                                     file_size=result.file_size,
                                     counter=counter,
                                 )
+                                await remove_pending(folder, fi.dedup_key)
                                 downloaded_ref[0] += 1
                                 if slot_id < len(self._worker_rows):
                                     self._worker_rows[slot_id].done(
@@ -1396,6 +1912,7 @@ class ArtistScreen(Screen):
                                     file_size=result.file_size,
                                     counter=counter,
                                 )
+                                await remove_pending(folder, fi.dedup_key)
                                 local_hashes[result.file_hash] = result.dest
                                 downloaded_ref[0] += 1
                                 if slot_id < len(self._worker_rows):
@@ -1514,6 +2031,7 @@ class ArtistScreen(Screen):
                             file_size=result.file_size,
                             counter=counter,
                         )
+                        await remove_pending(dest_folder, file_info.dedup_key)
                         downloaded_ref[0] += 1
                         if _slot0:
                             _slot0.done(final_name, "✓")

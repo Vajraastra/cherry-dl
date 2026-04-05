@@ -79,6 +79,17 @@ class SiteTemplate(ABC):
     # False obliga a descargar todo en el primer scan y deduplicar por hash local.
     provides_file_hashes: bool = False
 
+    # Delay entre páginas de API durante el scan (segundos).
+    # 0.0 = sin delay extra (Patreon y Pixiv ya tienen jitter interno).
+    # Kemono lo sobreescribe a 1.0 para evitar bursts agresivos.
+    scan_page_delay: float = 0.0
+
+    # Si el scan descubre >= cooldown_threshold URLs nuevas (scan agresivo),
+    # el engine espera cooldown_seconds antes de iniciar las descargas.
+    # Permite que las protecciones del servidor se "olviden" del burst de API.
+    cooldown_threshold: int = 200
+    cooldown_seconds: float = 10.0
+
     def __init__(self, engine: "DownloadEngine") -> None:
         self.engine = engine
 

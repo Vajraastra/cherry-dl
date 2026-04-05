@@ -46,6 +46,31 @@ _CREATE_IDX = "CREATE INDEX IF NOT EXISTS idx_hash ON files(hash);"
 # archivo procesado → sin índice es un table scan O(n) por archivo.
 _CREATE_IDX_URL = "CREATE INDEX IF NOT EXISTS idx_url_source ON files(url_source);"
 
+# Cola de descarga persistente por artista.
+# Cada URL descubierta se agrega aquí antes de descargar; se elimina al
+# completarse. Si el proceso se interrumpe, la cola sobrevive en disco y
+# la próxima sesión retoma sin re-escanear la API.
+# profile_url_id identifica qué fuente descubrió el archivo — permite que
+# un artista con múltiples fuentes (kemono + patreon) tenga colas separadas.
+_CREATE_PENDING = """
+CREATE TABLE IF NOT EXISTS pending_queue (
+    url_source      TEXT PRIMARY KEY,
+    download_url    TEXT NOT NULL,
+    filename_hint   TEXT NOT NULL,
+    post_id         TEXT,
+    post_published  TEXT,
+    remote_hash     TEXT,
+    extra_headers   TEXT,
+    profile_url_id  INTEGER,
+    discovered_at   INTEGER NOT NULL
+);
+"""
+
+_CREATE_IDX_PENDING = (
+    "CREATE INDEX IF NOT EXISTS idx_pending_url_id "
+    "ON pending_queue(profile_url_id);"
+)
+
 # Migraciones para catálogos existentes creados antes de agregar estas columnas
 _MIGRATE_COUNTER = """
 ALTER TABLE files ADD COLUMN counter INTEGER;
@@ -73,6 +98,8 @@ async def init_catalog(artist_dir: Path) -> None:
         await db.execute(_CREATE_META)
         await db.execute(_CREATE_IDX)
         await db.execute(_CREATE_IDX_URL)
+        await db.execute(_CREATE_PENDING)
+        await db.execute(_CREATE_IDX_PENDING)
 
         # Migrar columna counter si no existe (catálogos previos)
         async with db.execute(
@@ -320,6 +347,203 @@ async def apply_compaction(
             (new_total,),
         )
         await db.commit()
+
+
+# ── Meta genérica (enteros) ────────────────────────────────────────────────────
+
+async def set_meta_int(artist_dir: Path, key: str, value: int) -> None:
+    """
+    Guarda (o actualiza) un entero en la tabla meta con clave arbitraria.
+    Útil para guardar totales de batch, fronteras de scan, etc.
+    """
+    db_path = artist_dir / CATALOG_NAME
+    async with _db(db_path) as db:
+        await db.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+            (key, value),
+        )
+        await db.commit()
+
+
+async def get_meta_int(artist_dir: Path, key: str) -> int | None:
+    """
+    Lee un entero de la tabla meta por clave. Retorna None si no existe.
+    """
+    db_path = artist_dir / CATALOG_NAME
+    if not db_path.exists():
+        return None
+    async with _db(db_path) as db:
+        async with db.execute(
+            "SELECT value FROM meta WHERE key = ?", (key,)
+        ) as cur:
+            row = await cur.fetchone()
+    return row[0] if row else None
+
+
+# ── Cola de pendientes ─────────────────────────────────────────────────────────
+
+async def add_pending(
+    artist_dir: Path,
+    url_source: str,
+    download_url: str,
+    filename_hint: str,
+    post_id: str = "",
+    post_published: str = "",
+    remote_hash: str = "",
+    extra_headers: str | None = None,
+    profile_url_id: int | None = None,
+) -> None:
+    """
+    Agrega un archivo a la cola de pendientes (INSERT OR IGNORE).
+    Si la url_source ya existe no hace nada — seguro llamar múltiples veces.
+    """
+    db_path = artist_dir / CATALOG_NAME
+    async with _db(db_path) as db:
+        await db.execute(
+            """
+            INSERT OR IGNORE INTO pending_queue
+                (url_source, download_url, filename_hint, post_id,
+                 post_published, remote_hash, extra_headers,
+                 profile_url_id, discovered_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                url_source, download_url, filename_hint,
+                post_id or "", post_published or "", remote_hash or "",
+                extra_headers, profile_url_id, int(time.time()),
+            ),
+        )
+        await db.commit()
+
+
+async def pending_url_exists(artist_dir: Path, url_source: str) -> bool:
+    """Retorna True si la URL ya está en la cola de pendientes."""
+    db_path = artist_dir / CATALOG_NAME
+    if not db_path.exists():
+        return False
+    async with _db(db_path) as db:
+        async with db.execute(
+            "SELECT 1 FROM pending_queue WHERE url_source = ? LIMIT 1",
+            (url_source,),
+        ) as cur:
+            return await cur.fetchone() is not None
+
+
+async def pending_count(
+    artist_dir: Path,
+    profile_url_id: int | None = None,
+) -> int:
+    """
+    Retorna la cantidad de archivos en la cola de pendientes.
+    Si profile_url_id está definido, filtra por esa fuente.
+    """
+    db_path = artist_dir / CATALOG_NAME
+    if not db_path.exists():
+        return 0
+    async with _db(db_path) as db:
+        if profile_url_id is not None:
+            async with db.execute(
+                "SELECT COUNT(*) FROM pending_queue WHERE profile_url_id = ?",
+                (profile_url_id,),
+            ) as cur:
+                row = await cur.fetchone()
+        else:
+            async with db.execute(
+                "SELECT COUNT(*) FROM pending_queue"
+            ) as cur:
+                row = await cur.fetchone()
+    return row[0] if row else 0
+
+
+async def get_pending_files(
+    artist_dir: Path,
+    profile_url_id: int | None = None,
+) -> list[dict]:
+    """
+    Retorna los archivos pendientes de descarga como lista de dicts.
+    Si profile_url_id está definido, filtra por esa fuente.
+    Ordenados por orden de descubrimiento (FIFO).
+    """
+    db_path = artist_dir / CATALOG_NAME
+    if not db_path.exists():
+        return []
+    async with _db(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        if profile_url_id is not None:
+            async with db.execute(
+                """
+                SELECT url_source, download_url, filename_hint,
+                       post_id, post_published, remote_hash, extra_headers
+                FROM pending_queue
+                WHERE profile_url_id = ?
+                ORDER BY discovered_at
+                """,
+                (profile_url_id,),
+            ) as cur:
+                rows = await cur.fetchall()
+        else:
+            async with db.execute(
+                """
+                SELECT url_source, download_url, filename_hint,
+                       post_id, post_published, remote_hash, extra_headers
+                FROM pending_queue
+                ORDER BY discovered_at
+                """
+            ) as cur:
+                rows = await cur.fetchall()
+    return [dict(row) for row in rows]
+
+
+async def remove_pending(artist_dir: Path, url_source: str) -> None:
+    """
+    Elimina un archivo de la cola de pendientes.
+    Llamar tras descarga exitosa o skip por dedup.
+    """
+    db_path = artist_dir / CATALOG_NAME
+    async with _db(db_path) as db:
+        await db.execute(
+            "DELETE FROM pending_queue WHERE url_source = ?", (url_source,)
+        )
+        await db.commit()
+
+
+async def compare_catalogs(folder_a: Path, folder_b: Path) -> dict:
+    """
+    Compara dos catálogos de artista por hashes SHA-256.
+
+    Diseñado para detectar perfiles duplicados: si una fracción alta de los
+    hashes de B ya existe en A, ambas carpetas probablemente son el mismo artista.
+
+    Retorna:
+        total_a     — archivos en catálogo A (el más grande / más antiguo)
+        total_b     — archivos en catálogo B (candidato a fusión)
+        matches     — hashes presentes en ambos catálogos
+        coverage    — fracción de B que ya existe en A  (0.0 – 1.0)
+        unique_to_b — hashes en B que NO están en A (necesitarían moverse)
+    """
+    hashes_a = await get_all_hashes(folder_a)
+    hashes_b = await get_all_hashes(folder_b)
+
+    if not hashes_b:
+        return {
+            "total_a": len(hashes_a),
+            "total_b": 0,
+            "matches": 0,
+            "coverage": 0.0,
+            "unique_to_b": [],
+        }
+
+    common = hashes_a & hashes_b
+    unique = hashes_b - hashes_a
+    coverage = len(common) / len(hashes_b)
+
+    return {
+        "total_a":     len(hashes_a),
+        "total_b":     len(hashes_b),
+        "matches":     len(common),
+        "coverage":    coverage,
+        "unique_to_b": list(unique),
+    }
 
 
 async def get_stats(artist_dir: Path) -> dict:

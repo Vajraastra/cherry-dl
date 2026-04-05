@@ -1121,4 +1121,127 @@ legítimo → log garantizado. `wait_for` subió a 660s como safety net.
 - `cherry_dl/templates/kemono.py` — `_hash_from_path()` para formato nuevo, Referer header
 - `cherry_dl/tui/app.py` — `total_timeout=570` en llamadas, `wait_for` a 660s
 
+---
+
+## Fase 10 — Mapa persistente de URLs + politeness layer (2026-04-04)
+
+### Problema raíz
+Al reanudar una descarga o hacer "Actualizar", el template paginaba la API del servidor
+(cientos de GETs en ráfaga) para descubrir qué URLs bajar. Cuando las descargas reales
+comenzaban, el servidor ya había activado sus protecciones por el burst de API → throttling
+desde el primer archivo. En Kemono esto era reproducible casi siempre con 3 workers.
+
+### Solución implementada
+
+#### cola persistente `pending_queue` en `catalog.db`
+Nueva tabla por artista. Una URL descubierta se escribe en pending_queue antes de
+descargar. Al completarse (éxito o dedup), se elimina. Si el proceso se interrumpe,
+la cola sobrevive en disco y la próxima sesión retoma sin re-escanear la API.
+
+Columnas: `url_source (PK)`, `download_url`, `filename_hint`, `post_id`, `post_published`,
+`remote_hash`, `extra_headers (JSON)`, `profile_url_id`, `discovered_at`.
+
+`profile_url_id` separa las colas de fuentes diferentes que comparten carpeta
+(kemono + patreon del mismo artista → mismo catalog.db, colas distintas).
+
+#### Dos fases separadas en `_do_download`
+**Fase 1 — Scan:** itera la API lentamente (con delays), escribe a pending_queue.
+Si pending_count > 0 (sesión interrumpida), salta el scan directamente.
+
+**Fase 2 — Download:** lee pending_queue, construye FileInfo, alimenta workers.
+Workers llaman `remove_pending` en éxito/dedup para limpiar la cola.
+
+**Enfriamiento post-scan:** si el scan descubrió ≥ cooldown_threshold URLs nuevas,
+espera cooldown_seconds antes de iniciar descargas (configurable por template).
+
+#### Class vars nuevas en `SiteTemplate` (base.py)
+- `scan_page_delay: float = 0.0` — delay entre páginas de API durante scan
+- `cooldown_threshold: int = 200` — umbral para activar enfriamiento
+- `cooldown_seconds: float = 10.0` — duración del enfriamiento
+
+#### Kemono específico (kemono.py)
+- `workers = 2` (era 3 — con 3 se activa rate limiting agresivo)
+- `scan_page_delay = 1.0` — 1 segundo entre cada página de posts API
+- `cooldown_threshold = 100` — umbral más bajo (Kemono es más sensible)
+- `cooldown_seconds = 12.0`
+
+Patreon y Pixiv ya tenían jitter interno entre requests (`random.uniform`),
+no necesitan scan_page_delay adicional.
+
+### Flujo resultante
+```
+Primera vez:
+  scan API (1 pág/s) → pending_queue → [cooldown si >100] → descargar
+
+Retomar tras interrupción:
+  pending_count > 0 → SKIP scan → descargar directamente (0 requests API)
+
+Actualizar (↑):
+  pending_count = 0 → scan desde last_synced (pocas páginas) → descargar
+```
+
+### Archivos modificados
+- `cherry_dl/catalog.py` — tabla pending_queue + 5 funciones nuevas + migración en init_catalog
+- `cherry_dl/templates/base.py` — scan_page_delay, cooldown_threshold, cooldown_seconds
+- `cherry_dl/templates/kemono.py` — workers=2, scan_page_delay=1.0, cooldown vars, delay en iter_files
+- `cherry_dl/tui/app.py` — _do_download refactorizado en dos fases, remove_pending en worker_task
+
 ### Verificado en producción: 2026-03-29 ✓
+
+---
+
+## Fase 11 — Detección de duplicados + comparación por hash (2026-04-04)
+
+### Motivación
+Con 27+ perfiles activos, es posible crear duplicados accidentalmente (mismo artista, distinta URL).
+Se implementaron dos sistemas complementarios de detección:
+
+### Sistema 1 — Levenshtein en creación (preventivo)
+Al resolver la URL de un nuevo perfil en `NewProfileModal._resolve_url()`, se compara el nombre
+del artista resuelto contra todos los perfiles existentes usando `difflib.SequenceMatcher`.
+Si la similitud ≥ 0.80, se muestra una notificación de advertencia con el nombre del perfil similar.
+No bloquea la creación — el usuario decide.
+
+### Sistema 2 — Comparación por hash (post-hoc)
+`compare_catalogs(folder_a, folder_b)` en `catalog.py` carga los SHA-256 de archivos de dos
+catalog.db y retorna `{total_a, total_b, matches, coverage, unique_to_b}`.
+Si coverage ≥ 0.80, se considera posible duplicado.
+
+Flujo completo desde ProfilesScreen:
+```
+Seleccionar perfil A → "⊗ Comparar" → SelectProfileModal (elige B)
+  → _do_compare() → compare_catalogs() → CompareResultModal (muestra stats)
+    → si acepta fusionar → MergeConfirmModal (confirmación final)
+      → merge_profiles() → URLs de B reasignadas a A, B eliminado
+```
+
+`merge_profiles()` en `index.py`:
+- Reasigna todas las profile_urls de remove_id a keep_id
+- Elimina la entrada en artists y en profiles para remove_id
+- NO mueve archivos en disco — el usuario es responsable
+- Usa `PRAGMA foreign_keys = OFF` para gestión manual de cascada
+
+### Botón "⟳ Chequear Todo"
+Recorre todos los perfiles y actualiza la columna "Estado" con `pending_count()` sin hacer
+ninguna descarga. Útil para ver de un vistazo qué perfiles tienen trabajos pendientes.
+
+### Archivos modificados
+- `cherry_dl/catalog.py` — `compare_catalogs()`
+- `cherry_dl/index.py` — `merge_profiles()`
+- `cherry_dl/tui/app.py` — columna Estado, botones Comparar/Chequear Todo, 3 nuevos modales,
+  chequeo Levenshtein en NewProfileModal
+
+### Bugs corregidos post-implementación
+
+**Bug 1 — `pending_count` sin await en `_do_check_all`**
+- Síntoma: `'>' not supported between instances of 'coroutine' and 'int'`
+- Causa: `pending_count` es `async` pero se llamaba sin `await`
+- Fix: `cnt = await pending_count(folder)`
+
+**Bug 2 — `update_cell_at` no actualizaba celdas visibles**
+- Síntoma: "Estado actualizado" sin cambio visual en la tabla
+- Causa: `get_row_at()` devuelve valores con markup Rich (ej. `[yellow]⏳ 1375[/]`).
+  Comparar `int(row[0]) == p["id"]` fallaba silenciosamente porque el contenido de la
+  primera celda ya no era un string limpio tras el primer render.
+- Fix: `_do_check_all` ahora llama directamente `await self._load_profiles()` que
+  reconstruye la tabla completa con estados correctos. Más simple y sin el problema de parsing.

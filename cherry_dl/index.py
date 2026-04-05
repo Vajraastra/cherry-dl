@@ -475,6 +475,48 @@ async def delete_profile(db_path: Path, profile_id: int) -> None:
         await db.commit()
 
 
+async def merge_profiles(
+    db_path: Path,
+    keep_id: int,
+    remove_id: int,
+) -> int:
+    """
+    Fusiona el perfil remove_id en keep_id.
+
+    - Todas las profile_urls de remove_id se reasignan a keep_id.
+    - Se elimina el perfil remove_id y su entrada en artists.
+    - La carpeta en disco NO se toca — el llamador es responsable de
+      mover los archivos únicos antes de llamar a esta función.
+
+    Retorna el número de URLs reasignadas.
+    """
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute("PRAGMA foreign_keys = OFF")   # gestión manual
+
+        # Reasignar URLs del perfil a eliminar
+        async with db.execute(
+            "UPDATE profile_urls SET profile_id = ? WHERE profile_id = ?",
+            (keep_id, remove_id),
+        ) as cur:
+            moved = cur.rowcount
+
+        # Eliminar entrada de artists vinculada al perfil que desaparece
+        async with db.execute(
+            "SELECT folder_path FROM profiles WHERE id = ?", (remove_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        if row:
+            await db.execute(
+                "DELETE FROM artists WHERE folder_path = ?", (row[0],)
+            )
+
+        # Eliminar el perfil (sus URLs ya fueron reasignadas)
+        await db.execute("DELETE FROM profiles WHERE id = ?", (remove_id,))
+        await db.commit()
+
+    return moved
+
+
 async def set_profile_url_enabled(
     db_path: Path, url_id: int, enabled: bool
 ) -> None:
