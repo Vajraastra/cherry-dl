@@ -199,6 +199,16 @@ La compactación es puramente de organización (numeración sin huecos).
 
 ---
 
+### Batch Download — COMPLETA ✓ (2026-04-06)
+- [x] `tui/app.py`: `BatchScreen` — pantalla completa con loop de descarga por lotes
+- [x] `tui/app.py`: botón "⚡ Batch" en `ProfilesScreen` → `push_screen(BatchScreen())`
+- [x] `BatchScreen._scan_url()` — escanea una URL y puebla `pending_queue` (retoma sesión anterior sin re-escanear si ya hay pendientes)
+- [x] `BatchScreen._download_url()` — descarga secuencial (1 worker) con contador `consecutive_errors`; abandona perfil tras `MAX_CONSECUTIVE=5` errores seguidos
+- [x] `BatchScreen._do_batch()` — loop `while to_process`: scan→descarga por perfil, reintenta incompletos en siguiente iteración hasta que no queden o el usuario detenga
+- [x] `tui/theme.tcss`: estilos para `#batch-main`, `#batch-stats`, `#batch-log`, `#batch-footer`
+- [x] Progreso visual: `ProgressBar` por perfil + log detallado + stats de iteración
+- [x] Botón "⏹ Detener" para parada graceful (termina archivo actual, detiene el loop)
+
 ### Fase 11 — Detección de duplicados + comparación por hash: COMPLETA ✓ (2026-04-04)
 - [x] Bug fix: `pending_count()` faltaba `await` en `_do_check_all` (coroutine vs int)
 - [x] Bug fix: `_do_check_all` refactorizado para llamar `_load_profiles()` en vez de `update_cell_at` (markup en celdas impedía matching por contenido)
@@ -222,6 +232,25 @@ La compactación es puramente de organización (numeración sin huecos).
 - [x] `kemono.py`: `workers=2`, `scan_page_delay=1.0`, `cooldown_threshold=100`, delay en `iter_files`
 - [x] `tui/app.py`: `_do_download` en dos fases (scan→pending_queue → cooldown → descargar desde cola)
 - [x] `tui/app.py`: `remove_pending` en todos los puntos de éxito/skip del `worker_task`
+
+### Auditoría post-Fase 11 — COMPLETA ✓ (2026-04-07)
+- [x] BUG-1: `await compare_catalogs(...)` — sin await retornaba coroutine
+- [x] BUG-2: `len(s.get("unique_to_b", []))` — era list impresa como string
+- [x] BUG-3: `next_counter` movido post-éxito; descarga a `_dl_{hash}{ext}` temporal
+- [x] BUG-4: `_do_verify` ahora maneja `NeedsManualAuth` / `NeedsPixivAuth`
+- [x] BUG-5: `action_go_back` usa `_pending_exit` para diferir `pop_screen`
+- [x] BUG-6: `_name_similarity` sin pre-normalizar (idempotente pero redundante)
+- [x] DEUDA-2: `get_event_loop()` → `get_running_loop()` en `engine.py`
+
+### Sistema de filtro por tipo de archivo (BatchScreen) — COMPLETA ✓ (2026-04-07)
+- [x] `tui/app.py`: `EXT_GROUPS` — 7 grupos, 53 extensiones (imágenes, animaciones, video, audio, comprimidos, documentos, archivos de proyecto)
+- [x] `tui/app.py`: `BatchScreen.compose()` reemplaza Input de texto con `Checkbox` por grupo + campo custom
+- [x] `tui/app.py`: `_start_batch()` — modo include (`exclude_mode=False`), construye set con punto normalizado
+- [x] `tui/app.py`: `_download_url()` recibe `ext_filter`/`exclude_mode` y aplica filtro en tiempo de descarga
+- [x] `tui/theme.tcss`: estilos para `#batch-filter-groups`, `#batch-filter-custom`, `#batch-cfg-top`
+- [x] `tests/test_ext_groups.py`: 18 tests (integridad de grupos + lógica de filtro + casos edge)
+- [x] BUG: filtro no se aplicaba en `_download_url` → ítems de `pending_queue` sin filtro se descargaban igual
+- [x] BUG: extensiones sin punto en `include_exts` → `Path.suffix` devuelve con punto → nada coincidía → todo se rechazaba
 
 ### Features
 - [ ] Verificación periódica automática (scheduler interno)

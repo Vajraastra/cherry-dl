@@ -26,7 +26,7 @@ class NetworkConfig(BaseModel):
     delay_max: float = Field(30.0, ge=0)
     retries_api: int = Field(6, ge=1)
     retries_file: int = Field(7, ge=1)
-    stall_timeout: int = Field(120, ge=10)  # segundos sin datos → stall
+    stall_timeout: int = Field(45, ge=10)   # segundos sin datos → stall
 
     @field_validator("delay_max")
     @classmethod

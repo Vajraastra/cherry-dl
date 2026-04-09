@@ -227,25 +227,31 @@ class DownloadEngine:
         on_progress: Callable[[int, int], None] | None = None,
         extra_headers: dict | None = None,
         total_timeout: float | None = None,
+        on_status: Callable[[str], None] | None = None,
+        max_retries: int | None = None,
     ) -> DownloadResult:
         """
         Descarga un archivo al directorio destino.
         Respeta el semáforo del pool (max N descargas simultáneas).
         Retorna DownloadResult con hash SHA-256 y tamaño.
 
-        on_progress:    callback(bytes_done, total_bytes) por chunk.
-        extra_headers:  headers adicionales por archivo (ej. Referer de Pixiv).
-                        Se fusionan con los headers base del cliente.
-        total_timeout:  timeout total en segundos para toda la descarga
-                        (incluyendo reintentos). Si se excede, retorna
-                        DownloadResult(error_kind=TIMEOUT) de forma limpia,
-                        sin lanzar excepciones. Usar en lugar de asyncio.wait_for
-                        para evitar problemas de CancelledError en Python 3.12.
+        on_progress:  callback(bytes_done, total_bytes) por chunk.
+        extra_headers: headers adicionales por archivo (ej. Referer de Pixiv).
+                       Se fusionan con los headers base del cliente.
+        total_timeout: timeout total en segundos para toda la descarga
+                       (incluyendo reintentos). Si se excede, retorna
+                       DownloadResult(error_kind=TIMEOUT) de forma limpia,
+                       sin lanzar excepciones.
+        on_status:    callback(msg: str) llamado en cada transición de estado
+                      importante (delay, conexión, stall, retry, etc.).
+        max_retries:  sobreescribe config.network.retries_file para esta llamada.
+                      Útil en batch (max_retries=1) para falla rápida —
+                      el loop de iteraciones del batch es el mecanismo de reintento.
         """
         async with self._semaphore:
             return await self._do_download(
                 url, dest_dir, filename, progress, task_id,
-                on_progress, extra_headers, total_timeout,
+                on_progress, extra_headers, total_timeout, on_status, max_retries,
             )
 
     async def run_queue(
@@ -364,6 +370,8 @@ class DownloadEngine:
         on_progress: Callable[[int, int], None] | None = None,
         extra_headers: dict | None = None,
         total_timeout: float | None = None,
+        on_status: Callable[[str], None] | None = None,
+        max_retries: int | None = None,
     ) -> DownloadResult:
         """
         Descarga un archivo con retry y soporte de Range requests para CDNs
@@ -387,7 +395,7 @@ class DownloadEngine:
           que en Python 3.12 puede propagar CancelledError en lugar de TimeoutError
           cuando httpx re-crea la excepción durante cleanup de streams HTTP/2.
         """
-        max_errors = self.config.network.retries_file
+        max_errors = max_retries if max_retries is not None else self.config.network.retries_file
         last_error: str = ""
         last_kind:  str = ErrorKind.UNKNOWN
 
@@ -399,7 +407,7 @@ class DownloadEngine:
 
         # Tiempo de inicio para timeout total del engine.
         # asyncio.get_event_loop().time() usa el reloj monotónico del loop.
-        _t_start = asyncio.get_event_loop().time() if total_timeout else 0.0
+        _t_start = asyncio.get_running_loop().time() if total_timeout else 0.0
 
         while True:
             if error_count >= max_errors:
@@ -414,7 +422,7 @@ class DownloadEngine:
             # httpx puede re-crear CancelledError al hacer cleanup de streams
             # HTTP/2, lo que impide que wait_for lo convierta correctamente a
             # TimeoutError y causa que el worker desaparezca sin log.
-            if total_timeout and asyncio.get_event_loop().time() - _t_start >= total_timeout:
+            if total_timeout and asyncio.get_running_loop().time() - _t_start >= total_timeout:
                 return DownloadResult(
                     url=url, filename=filename,
                     error=f"Timeout total ({total_timeout:.0f}s)",
@@ -425,8 +433,14 @@ class DownloadEngine:
                 # Delay completo antes de cada intento fresco.
                 # Pausa mínima entre range resumes para no cerrar el flujo.
                 if resume_from == 0:
+                    if on_status:
+                        d_min = self.config.network.delay_min
+                        d_max = self.config.network.delay_max
+                        on_status(f"⏳ esperando ({d_min:.0f}–{d_max:.0f}s)…")
                     await self._delay()
                 else:
+                    if on_status:
+                        on_status("↺ continuando rango…")
                     await asyncio.sleep(random.uniform(0.5, 2.0))
 
                 # Añadir Range header si estamos resumiendo un archivo parcial.
@@ -436,6 +450,8 @@ class DownloadEngine:
 
                 chunk_received = 0   # bytes recibidos en ESTE request
 
+                if on_status:
+                    on_status("→ conectando…")
                 async with self._client.stream(
                     "GET", url, headers=req_headers
                 ) as resp:
@@ -461,6 +477,8 @@ class DownloadEngine:
                         last_error = f"Cloudflare bloqueó la descarga (403 CF) — esperando {wait}s"
                         last_kind  = ErrorKind.CLOUDFLARE
                         error_count += 1
+                        if on_status:
+                            on_status(f"🛡 Cloudflare — esperando {wait}s…")
                         chunks.clear(); resume_from = 0; full_size = 0
                         await asyncio.sleep(wait)
                         continue
@@ -471,6 +489,8 @@ class DownloadEngine:
                         last_error = f"Demasiadas peticiones (429) — esperando {wait}s"
                         last_kind  = ErrorKind.RATE_LIMIT
                         error_count += 1
+                        if on_status:
+                            on_status(f"⏸ rate limit 429 — esperando {wait}s…")
                         chunks.clear(); resume_from = 0; full_size = 0
                         await asyncio.sleep(wait)
                         continue
@@ -481,6 +501,11 @@ class DownloadEngine:
                         last_error = f"Error del servidor ({code})"
                         last_kind  = ErrorKind.SERVER
                         error_count += 1
+                        if on_status:
+                            on_status(
+                                f"↺ error {code} — reintentando "
+                                f"({error_count}/{max_errors})…"
+                            )
                         chunks.clear(); resume_from = 0; full_size = 0
                         await asyncio.sleep(backoff)
                         continue
@@ -517,7 +542,12 @@ class DownloadEngine:
                     # read_timeout aplica por chunk: si el servidor no envía
                     # ningún byte en stall_timeout segundos, httpx lanza
                     # ReadTimeout → capturado abajo como TimeoutException.
+                    _first_chunk = True
                     async for chunk in resp.aiter_bytes(chunk_size=65536):
+                        if _first_chunk:
+                            if on_status:
+                                on_status("↓ descargando…")
+                            _first_chunk = False
                         chunks.append(chunk)
                         chunk_received += len(chunk)
                         if progress and task_id is not None:
@@ -588,6 +618,11 @@ class DownloadEngine:
                 if resume_from == 0:
                     chunks.clear()
                     full_size = 0
+                if on_status:
+                    on_status(
+                        f"⏱ stall/timeout — reintentando "
+                        f"({error_count}/{max_errors}) en {backoff:.1f}s…"
+                    )
                 await asyncio.sleep(backoff)
 
             except httpx.RequestError as e:
@@ -600,6 +635,11 @@ class DownloadEngine:
                 if resume_from == 0:
                     chunks.clear()
                     full_size = 0
+                if on_status:
+                    on_status(
+                        f"⚠ red ({type(e).__name__}) — reintentando "
+                        f"({error_count}/{max_errors}) en {backoff:.1f}s…"
+                    )
                 await asyncio.sleep(backoff)
 
     async def _delay(self) -> None:

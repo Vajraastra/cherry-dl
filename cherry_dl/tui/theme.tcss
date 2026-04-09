@@ -502,6 +502,115 @@ NewProfileModal, AddUrlModal {
     margin-left: 1;
 }
 
+/* ── BatchScreen ───────────────────────────────────────────────────────────── */
+
+#batch-main {
+    height: 1fr;
+    padding: 1 2;
+}
+
+#batch-config {
+    height: auto;
+    padding: 1 0;
+    border-bottom: solid #3a3a5a;
+    margin-bottom: 1;
+}
+
+#batch-cfg-top {
+    height: 3;
+    align: left middle;
+    margin-bottom: 1;
+}
+
+.batch-filter-title {
+    color: #7777aa;
+    padding: 0 1;
+    height: 1;
+    margin-bottom: 0;
+}
+
+#batch-filter-groups {
+    height: auto;
+    padding: 0 1;
+    margin-bottom: 1;
+    align: left middle;
+}
+
+#batch-filter-groups Checkbox {
+    margin-right: 2;
+    background: transparent;
+    color: #c0c0d8;
+}
+
+#batch-filter-groups Checkbox:focus {
+    color: #e75480;
+}
+
+#batch-filter-groups Checkbox.-on {
+    color: #e75480;
+}
+
+#batch-filter-custom {
+    height: 3;
+    align: left middle;
+}
+
+.batch-cfg-label {
+    padding: 0 1;
+    color: $text;
+    content-align: left middle;
+    height: 3;
+}
+
+.batch-cfg-input {
+    width: 8;
+}
+
+.batch-cfg-ext {
+    width: 44;
+}
+
+#batch-stats {
+    height: 1;
+    color: #aaaacc;
+    margin-bottom: 1;
+}
+
+#batch-current {
+    height: 1;
+    margin-bottom: 1;
+}
+
+#batch-bar {
+    margin-bottom: 1;
+}
+
+#batch-log {
+    height: 1fr;
+    border: solid #3a3a5a;
+    padding: 0 1;
+}
+
+#batch-footer {
+    height: 3;
+    align: right middle;
+    padding: 0 2;
+    border-top: solid #3a3a5a;
+}
+
+#batch-footer Button {
+    margin-left: 1;
+}
+
+#btn-batch-skip {
+    background: #4a3a1a;
+    color: #ffcc66;
+}
+
+#btn-batch-skip:hover {
+    background: #6a5a2a;
+}
+
 /* ── SettingsScreen ────────────────────────────────────────────────────────── */
 
 #settings-grid {
@@ -521,3 +630,4 @@ NewProfileModal, AddUrlModal {
     color: #7777aa;
     margin-bottom: 0;
 }
+

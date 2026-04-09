@@ -131,11 +131,14 @@ def build_filename(artist_name: str, counter: int, original_filename: str) -> st
 # ── Descarga para GUI (sin Rich) ───────────────────────────────────────────────
 
 
-def _parse_ext_filter(raw: str) -> set[str]:
+def _parse_ext_filter(raw: str | None) -> set[str]:
     """
     Convierte una cadena como '.zip, .rar, jpg' en un set normalizado:
     {'.zip', '.rar', '.jpg'}
+    Retorna set vacío si raw es None o cadena vacía.
     """
+    if not raw:
+        return set()
     result = set()
     for part in raw.split(","):
         ext = part.strip().lower()
