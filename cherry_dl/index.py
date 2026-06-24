@@ -40,7 +40,7 @@ _CREATE_PROFILES = """
 CREATE TABLE IF NOT EXISTS profiles (
     id           INTEGER PRIMARY KEY,
     display_name TEXT NOT NULL,
-    folder_path  TEXT NOT NULL UNIQUE,  -- {download_dir}/{site_primario}/{nombre}/
+    folder_path  TEXT NOT NULL UNIQUE,  -- {download_dir}/{nombre}/ (estructura plana)
     primary_site TEXT NOT NULL,         -- sitio de la URL con la que se creó
     created_at   TEXT,
     last_checked TEXT,

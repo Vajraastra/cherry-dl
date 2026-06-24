@@ -275,9 +275,10 @@ class NewProfileWizard(QWidget):
 
     def _update_folder_preview(self) -> None:
         name = self._name_input.text().strip()
-        site = self._detected_site or "sitio"
         if name:
-            folder = load_config().download_path / site / _safe_dirname(name)
+            # Estructura plana {download_dir}/{nombre} — debe coincidir con
+            # create_profile / organize / reindex (sin subcarpeta de sitio).
+            folder = load_config().download_path / _safe_dirname(name)
             self._lbl_folder.setText(str(folder))
         else:
             self._lbl_folder.setText("—")

@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
@@ -776,6 +777,7 @@ class ArtistDetailView(QWidget):
                 ext_filter=ext_filter,
                 exclude_mode=False,
                 emit=self._on_service_event,
+                resolve_auth=self._resolve_auth,
             )
             await update_profile_last_checked(INDEX_DB, self._profile["id"])
             msg = f"Completado \u2014 \u2193 {summary.downloaded} nuevos  skip {summary.skipped}"
@@ -834,6 +836,47 @@ class ArtistDetailView(QWidget):
             self._refresh_source_row(ev.url_id, ev.file_count)
         # SourceStarted / Cooldown / BatchInfo / ScanComplete -> ya cubiertos
         # por los eventos Log que el servicio emite junto a ellos.
+
+    async def _resolve_auth(self, site: str) -> bool:
+        """Resuelve autenticación interactiva cuando el servicio la pide.
+
+        El servicio llama esto si una fuente lanza NeedsManualAuth (sin sesión
+        y el login automático no prosperó). Devolver True permite reintentar.
+        """
+        if site != "patreon":
+            self._append_log(f"  ✗ Auth de {site} no soportada en la GUI todavía")
+            return False
+
+        from ...auth.patreon import NeedsManualAuth, ensure_patreon_session
+
+        reply = QMessageBox.question(
+            self,
+            "Sesión de Patreon requerida",
+            "No hay sesión activa de Patreon.\n\n"
+            "¿Abrir el navegador para iniciar sesión? Inicia sesión en la "
+            "ventana que se abra; cherry-dl capturará la sesión automáticamente.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Yes,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            self._append_log("  ✗ Login de Patreon cancelado por el usuario")
+            return False
+
+        self._append_log("  ⟳ Abriendo navegador para login de Patreon…")
+        try:
+            cookies = await ensure_patreon_session(
+                allow_guided=True,
+                on_status=lambda m: self._append_log(f"    {m}"),
+            )
+            if cookies.get("session_id"):
+                self._append_log("  ✓ Sesión de Patreon obtenida")
+                return True
+            self._append_log("  ✗ Login sin session_id")
+        except NeedsManualAuth as exc:
+            self._append_log(f"  ✗ {exc}")
+        except Exception as exc:
+            self._append_log(f"  ✗ Error en login: {exc}")
+        return False
 
     async def _do_deduplicate(self) -> None:
         """

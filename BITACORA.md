@@ -23,6 +23,28 @@ ahora llama a `run_profile_download(...)` y traduce los eventos tipados a widget
 - `exclude_mode=False` (la UI de filtro de la GUI es solo-incluir). `resolve_auth=None` por ahora
   → si falta sesión Patreon, el servicio loguea "auth cancelada" y salta la fuente (pendiente Paso 5).
 
+### Paso 5 — fix estructura de carpetas + resolve_auth en la GUI
+**(a) Estructura de carpetas plana.** `cherry_dl.profiles.create_profile` (y el preview del wizard)
+construían el `folder_path` como `{download_dir}/{site}/{nombre}` — estructura VIEJA. Pero
+`organizer.organize` (L85), `index.reindex_from_folders` (itera `download_dir.iterdir()` directo)
+y la biblioteca real (`G:\images\cherry-dl\BadSpider`, sin subcarpeta de sitio) son PLANAS
+`{download_dir}/{nombre}`. Consecuencia del bug: un perfil creado por el wizard tendría
+`folder_path=.../site/nombre`, pero el prescan organiza a `.../nombre` y reindex no lo casaría →
+archivos dispersos y perfil divergente del resto. Corregido a plano en `profiles.py` (L107 +
+docstring), `new_profile_wizard._update_folder_preview` y el comentario de schema en `index.py` L43.
+Verificado: `create_profile` ahora devuelve `{base}/{nombre}`.
+(`rename`→`replace` ya estaba resuelto: `grep .rename( cherry_dl/gui` → 0 — el download inline con
+`old_path.rename` se borró al delegar en el servicio en Paso 3; el servicio usa `.replace`.)
+
+**(b) resolve_auth cableado.** `ArtistDetailView._do_download` pasa `resolve_auth=self._resolve_auth`
+a `run_profile_download`. El nuevo `_resolve_auth(site)`: para `patreon` muestra un `QMessageBox`
+y, si el usuario acepta, hace `ensure_patreon_session(allow_guided=True, on_status=→log)` y retorna
+True si obtiene `session_id`; otros sitios → False con aviso. Antes el servicio recibía
+`resolve_auth=None` y saltaba la fuente logueando "auth cancelada".
+⚠ No se pudo probar headless (el login guiado abre un navegador real por CDP/nodriver y requiere
+acción del usuario). Validar interactivamente al abrir la GUI. La regresión del camino sin-auth sí
+se cubrió: la prueba e2e (template stub) sigue verde con el nuevo parámetro `resolve_auth`.
+
 ### Paso 4 — profiles_view: columna Estado sobre la pending_queue
 La columna Estado de la GUI sólo mostraba `✓ fecha` / "Sin verificar". Ahora replica la semántica
 de la TUI, basada en `pending_count` (filtrado por el ext_filter del perfil vía `_decode_profile_filter`):

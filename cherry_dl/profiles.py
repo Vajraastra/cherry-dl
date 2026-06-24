@@ -95,7 +95,9 @@ async def create_profile(
 
     - Detecta el sitio automáticamente desde la URL.
     - La carpeta destino se calcula como:
-        {base_dir}/{site}/{safe_name}/
+        {base_dir}/{safe_name}/
+      (estructura plana: igual que `organize`, `reindex_from_folders` y la
+      biblioteca real — un perfil = una carpeta directa bajo download_dir).
     - Agrega la URL principal como primera entrada en profile_urls.
     - Retorna el ID del perfil creado.
 
@@ -104,7 +106,7 @@ async def create_profile(
     from .index import create_profile as _db_create, add_profile_url
 
     site = _site_from_url(primary_url)
-    folder_path = base_dir / site / _safe_dirname(display_name)
+    folder_path = base_dir / _safe_dirname(display_name)
 
     profile_id = await _db_create(
         db_path=db_path,

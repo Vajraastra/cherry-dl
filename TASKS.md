@@ -2,10 +2,10 @@
 
 ## ← RETOMAR AQUÍ (handoff 2026-06-24 — fin sesión 3)
 
-**EMPEZAR POR: Fase 3, Paso 5** — wizard fix (`new_profile_wizard`: estructura de carpetas vieja
-en preview L279, `rename`→`replace`) + cablear `resolve_auth` (modal de auth Patreon; hoy el
-servicio loguea "auth cancelada" si falta sesión). Pasos 2-4 hechos y validados headless.
-Pasos 2-4 commiteados; hasta cc8dc8c pusheado a origin (Paso 4 pendiente push).
+**EMPEZAR POR: Fase 3, Paso 6** — `batch_view` (descarga por lotes multi-perfil sobre el servicio).
+Pasos 2-5 hechos. ⚠ El login Patreon de la GUI (`_resolve_auth`) NO se pudo probar headless
+(necesita navegador real + David); validar interactivamente al abrir la GUI. Pasos 2-5
+commiteados; hasta cc8dc8c en origin (Pasos 4-5 pendientes push).
 
 Contexto rápido: el servicio de descarga `cherry_dl/download_service.py` ya existe, está
 **validado headless con BadSpider** y es la base de la GUI. La GUI será la UI oficial; la TUI se
@@ -58,7 +58,14 @@ veredicto por archivo en BITACORA. Backend compartido es sólido; la TUI es la s
         Conteo filtrado por el ext_filter del perfil. `_encode/_decode_profile_filter` movidos de
         `tui/app.py` a `downloads.py` (TUI reimporta). Test headless: 5/5 estados OK, incluido el
         filtrado (⏳1 de 3 con filtro zip). 18/18 tests; import TUI+GUI OK.
-  - [ ] Paso 5 — wizard fix + resolve_auth. Paso 6 — batch_view.
+  - [x] **Paso 5** — (a) **fix estructura de carpetas**: `create_profile` y el preview del wizard
+        construían `download/site/nombre`, pero `organize`/`reindex`/la biblioteca real son planos
+        `download/nombre` → un perfil nuevo divergía de dónde prescan/descarga ponían los archivos.
+        Corregido a plano en `profiles.py`, wizard y comentario de schema. (b) **resolve_auth**:
+        `_do_download` pasa `resolve_auth=self._resolve_auth`; nuevo `_resolve_auth` muestra
+        QMessageBox y dispara `ensure_patreon_session(allow_guided=True)` con status al log.
+        (`rename`→`replace` ya estaba: no quedan `.rename(` en gui/.) ⚠ Login no probado headless.
+  - [ ] Paso 6 — batch_view.
         Paso 7 — duplicates_view. Paso 8 — lanzador GUI por defecto + deprecación TUI.
 - [ ] Bugs del legacy a corregir en el port: estructura de carpetas vieja en wizard (preview L279);
       `rename`→`replace`; portar EXT_GROUPS/pending_queue/incremental a la GUI.
