@@ -57,7 +57,7 @@ async def _download(url: str, workers: int | None, prescan: str | None = None) -
     from .engine import DownloadEngine, make_progress
     from .templates._registry import get_template
     from .catalog import init_catalog, hash_exists, add_file, next_counter
-    from .gui.bridge import build_filename
+    from .downloads import build_filename
     from .index import init_index, get_or_create_site, get_or_create_artist
 
     config = load_config()

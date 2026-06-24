@@ -13,7 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from cherry_dl.tui.app import EXT_GROUPS
-from cherry_dl.gui.bridge import _parse_ext_filter, _passes_ext_filter
+from cherry_dl.downloads import _parse_ext_filter, _passes_ext_filter
 
 
 # ── 1. Integridad de EXT_GROUPS ─────────────────────────────────────────────

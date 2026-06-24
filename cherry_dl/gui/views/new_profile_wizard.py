@@ -17,6 +17,7 @@ from typing import Callable
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
+    QFileDialog,
     QFormLayout,
     QFrame,
     QHBoxLayout,
@@ -29,8 +30,6 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-
-from ..native_dialog import pick_directory_sync
 
 from ...config import INDEX_DB, load_config
 from ...engine import DownloadEngine
@@ -259,7 +258,9 @@ class NewProfileWizard(QWidget):
         self._btn_prescan_run.setEnabled(bool(text.strip()))
 
     def _on_browse_prescan(self) -> None:
-        folder = pick_directory_sync("Carpeta con archivos preexistentes")
+        folder = QFileDialog.getExistingDirectory(
+            self, "Carpeta con archivos preexistentes"
+        )
         if folder:
             self._prescan_input.setText(folder)
 

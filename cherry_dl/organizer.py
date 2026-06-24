@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .catalog import add_file, get_all_hashes, init_catalog, next_counter
-from .gui.bridge import build_filename
+from .downloads import build_filename
 from .hasher import sha256_file
 
 # Extensiones de medios soportadas

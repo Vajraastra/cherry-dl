@@ -6,6 +6,49 @@
 
 ---
 
+## 2026-06-24 (sesión 2) — Migración a PySide6: auditoría + saneamiento
+
+### Contexto
+La GUI PySide6 en `cherry_dl/gui/` la hizo un agente anterior sin diseño competente → tratada
+como referencia sospechosa, no base. La TUI (`tui/app.py`) es la spec funcional; el backend
+(catalog/index/engine/templates/auth) es compartido y sólido.
+
+### Fase 1 — Auditoría del legacy (veredicto por archivo)
+- `theme.py` ✅ rescatar — QSS limpio, Fusion.
+- `app.py` ✅ rescatar+ampliar — router QStackedWidget + qasync correctos; faltan vistas Batch/
+  Duplicados y cleanup al cerrar.
+- `profiles_view.py` ✅ rescatar — qasync bien usado; falta columna Estado y botones Batch/Comparar.
+- `settings_view.py` ✅ rescatar — sólida (pydantic model_copy, validación).
+- `new_profile_wizard.py` 🟡 rescatar+fix — BUG: preview de carpeta usa estructura vieja
+  `download/{site}/{name}` (L279), debe ser artist-first; falta dedup-check Levenshtein.
+- `artist_detail_view.py` 🟡 rescatar+modernizar — sorprendentemente bueno (productor/workers,
+  dedup atómico in_progress_hashes, cola diferida, throttle UI 4Hz, cancelación correcta); NO usa
+  pending_queue, ni incremental last_synced, ni EXT_GROUPS; `rename` no Windows-safe (L1053).
+- `bridge.py` 🔴 reescribir — arquitectura Dear PyGui (AsyncBridge hilo+queue) mezclada con qasync;
+  TODO el cuerpo pesado es código muerto (0 usos: AsyncBridge, download_for_gui, prescan_and_download,
+  update_async, repair_async, load_collections_async, ProgressUpdate); funciones vivas con estructura
+  de carpetas vieja (bug) y URL kemono hardcoded. Solo 4 helpers se rescatan.
+- `native_dialog.py` 🔴 descartar — Linux-only (kdialog/zenity)+tkinter; en app Qt → QFileDialog.
+
+Heredado gratis: el lazy auth de Patreon ya funciona en la GUI (get_artist_info →
+ensure_patreon_session abre el navegador solo).
+
+### Saneamiento ejecutado (paso 1, mecánico)
+- Nuevo `cherry_dl/downloads.py`: helpers vivos extraídos de `gui/bridge.py` (build_filename,
+  _safe_prefix, _parse_ext_filter, _passes_ext_filter, _build_local_hash_map, _MEDIA_EXTENSIONS).
+  Rompe la dependencia invertida TUI→gui. De paso: `get_event_loop`→`get_running_loop`.
+- Redirigidos 8 imports: cli.py, organizer.py, tui/app.py (×5), gui/views/artist_detail_view.py,
+  tests/test_ext_groups.py → `cherry_dl.downloads`.
+- BORRADOS `gui/bridge.py` (código muerto + helpers movidos) y `gui/native_dialog.py`.
+- `QFileDialog.getExistingDirectory()` reemplaza `pick_directory_sync` en wizard y settings.
+- Verificación: smoke import de cli/tui/gui/downloads OK; 18/18 tests de test_ext_groups.
+
+### Próximo: Fase 2 (arquitectura)
+Servicio de descarga compartido (productor/workers + pending_queue + incremental) reutilizable
+por GUI y TUI — hoy duplicado entre tui/app.py y artist_detail_view.py. Luego port por vistas.
+
+---
+
 ## 2026-06-24 — Login de Patreon: cableado del CLI + auth perezosa
 
 ### Hecho

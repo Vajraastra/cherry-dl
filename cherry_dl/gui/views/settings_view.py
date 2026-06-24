@@ -18,6 +18,7 @@ from typing import Callable
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
     QFrame,
     QHBoxLayout,
@@ -28,8 +29,6 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-
-from ..native_dialog import pick_directory_sync
 
 from ...config import (
     CHERRY_DIR,
@@ -266,7 +265,9 @@ class SettingsView(QWidget):
 
     def _on_browse(self) -> None:
         current = self._download_dir.text() or str(Path.home())
-        folder = pick_directory_sync("Seleccionar carpeta de descargas", current)
+        folder = QFileDialog.getExistingDirectory(
+            self, "Seleccionar carpeta de descargas", current
+        )
         if folder:
             self._download_dir.setText(folder)
 

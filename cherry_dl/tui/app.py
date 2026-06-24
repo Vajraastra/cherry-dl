@@ -89,7 +89,7 @@ def _decode_profile_filter(stored: str) -> tuple[set[str], set[str]]:
     - Si no → formato legacy (extensiones separadas por coma).
     """
     import json
-    from ..gui.bridge import _parse_ext_filter
+    from ..downloads import _parse_ext_filter
 
     if not stored:
         return set(), set()
@@ -2308,7 +2308,7 @@ class ArtistScreen(Screen):
         from datetime import datetime
 
         from ..engine import DownloadEngine, ErrorKind
-        from ..gui.bridge import (
+        from ..downloads import (
             _build_local_hash_map,
             _parse_ext_filter,
             _passes_ext_filter,
@@ -3506,7 +3506,7 @@ class BatchScreen(Screen):
 
     def _start_batch(self) -> None:
         """Lee la config, oculta el panel de inicio y lanza el worker."""
-        from ..gui.bridge import _parse_ext_filter
+        from ..downloads import _parse_ext_filter
 
         try:
             batch_workers = max(1, int(
@@ -3759,7 +3759,7 @@ class BatchScreen(Screen):
         """
         import hashlib as _hl
         import json as _json
-        from ..gui.bridge import build_filename, _passes_ext_filter
+        from ..downloads import build_filename, _passes_ext_filter
 
         pu_id        = pu.get("id")
         pending_list = await get_pending_files(folder, pu_id)
@@ -4043,7 +4043,7 @@ class BatchScreen(Screen):
         use_profile_filter — si True, usa la configuración guardada de cada perfil.
         """
         from ..engine     import DownloadEngine
-        from ..gui.bridge import _build_local_hash_map
+        from ..downloads import _build_local_hash_map
         from ..index      import update_profile_url_sync, update_profile_last_checked
 
         config = load_config()

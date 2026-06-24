@@ -755,7 +755,7 @@ class ArtistDetailView(QWidget):
 
         try:
             from ...engine import DownloadEngine, ErrorKind
-            from ...gui.bridge import (
+            from ...downloads import (
                 _build_local_hash_map,
                 _parse_ext_filter,
                 _passes_ext_filter,

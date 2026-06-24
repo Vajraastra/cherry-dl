@@ -2,20 +2,33 @@
 
 ## ← RETOMAR AQUÍ (handoff 2026-06-24)
 
-**Login guiado de Patreon — CABLEADO + AUTOMÁTICO (sin commitear).**
-- [x] **`cli.py patreon-login` cableado**: login guiado por defecto; `--session-id` = fallback
-      manual. Quitados los `→` del docstring (rompían `--help` en consola cp1252).
-- [x] **Probado e2e**: `patreon-login` abrió Brave, capturó `session_id`, guardó session.json (exit 0).
-- [x] **Login perezoso (lazy auth)**: `auth/patreon.py:ensure_patreon_session(allow_guided=True)`
-      ahora dispara el login guiado solo cuando falta sesión y hay navegador → al sincronizar un
-      perfil de Patreon la app abre el navegador SOLA, sin comando previo ni flag. Es backend puro;
-      la TUI no se tocó (su modal NeedsManualAuth queda como fallback sin-navegador).
-- [ ] **Commit** de esta sesión (cli.py + auth/patreon.py).
-- [ ] Probar lazy auth real: borrar sesión + `cherry-dl download <url_patreon>` → debe auto-abrir login.
-- [ ] Ruido menor: nodriver deja ResourceWarnings de "unclosed transport" al cerrar en Windows
-      (no afecta resultado, exit 0). Suprimir si molesta.
-- [ ] **NO tocar TUI**; tras confirmar compat dual-OS → transición a **PySide6**.
-- [ ] Re-sync TOTAL del BadSpider real (mal organizado); 9 folders en `.recovery/recovery_review.txt`.
+**Login automático de Patreon — COMPLETO ✓ (commit 224475b, pusheado).**
+- [x] `cli.py patreon-login` cableado: login guiado por defecto; `--session-id` = fallback.
+- [x] Lazy auth: `ensure_patreon_session(allow_guided=True)` abre el navegador solo cuando falta
+      sesión y hay navegador. Backend puro; TUI no tocada.
+- [x] TTL eliminado: la sesión vale hasta que Patreon devuelva 401/403 → re-login automático.
+- [x] **Probado e2e**: 15 imágenes de BadSpider (campaign_id 1261877) sin abrir navegador
+      (sesión guardada reutilizada). 0 errores.
+
+**FOCO ACTUAL → Migración a PySide6.** La GUI legada NO es base confiable (agente anterior);
+veredicto por archivo en BITACORA. Backend compartido es sólido; la TUI es la spec de features.
+
+- [x] **Fase 1 — Auditoría del legacy** (veredicto en BITACORA). Hallazgos: vistas Qt razonables
+      (qasync/QSS OK); `bridge.py` podrido (DPG+qasync mezclado, código muerto, estructura de
+      carpetas vieja, kemono hardcoded); `native_dialog.py` Linux-only; faltan batch/duplicados/
+      compactación/EXT_GROUPS/pending_queue/incremental. Lazy auth Patreon ya funciona gratis.
+- [x] **Saneamiento** (commit pendiente): helpers vivos → `cherry_dl/downloads.py`; redirigidos
+      8 imports (cli, organizer, tui×5, artist_detail, test); `gui/bridge.py` y `native_dialog.py`
+      BORRADOS; `QFileDialog` reemplaza native_dialog en wizard+settings; `get_event_loop`→
+      `get_running_loop`. Smoke imports OK + 18/18 tests.
+- [ ] **Fase 2 — Arquitectura objetivo**: servicio de descarga compartido (productor/workers +
+      pending_queue + incremental) reutilizable por GUI y TUI; esqueleto de vistas; plan de port.
+- [ ] Bugs del legacy a corregir en el port: estructura de carpetas vieja en wizard (preview L279);
+      `rename`→`replace`; portar EXT_GROUPS/pending_queue/incremental a la GUI.
+
+**FUERA DE MI ALCANCE (el usuario las hace manualmente):** las sincronizaciones — sync masivo
+desde Patreon, re-sync de BadSpider real, y los 9 folders sin match en
+`.recovery/recovery_review.txt`. NO incluir en pendientes propios.
 
 **Recuperación + auth — listo y pusheado:** `recover` (46/55 perfiles), snapshot kemono
 offline, fix TOML Windows, prototipo login guiado probado (bajó 15 imgs de BadSpider).
