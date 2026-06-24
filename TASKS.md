@@ -1,6 +1,17 @@
 # TASKS — cherry-dl
 
-## ← RETOMAR AQUÍ (handoff 2026-06-24)
+## ← RETOMAR AQUÍ (handoff 2026-06-24 — fin sesión 3)
+
+**EMPEZAR POR: Fase 3, Paso 2** — mover `EXT_GROUPS` (dict de grupos de extensiones) de
+`tui/app.py` a `cherry_dl/downloads.py` para compartirlo entre el servicio y la GUI. Luego Paso 3
+(cablear `artist_detail_view` al servicio). Todo pusheado a origin/main hasta el commit 3e70eb2.
+
+Contexto rápido: el servicio de descarga `cherry_dl/download_service.py` ya existe, está
+**validado headless con BadSpider** y es la base de la GUI. La GUI será la UI oficial; la TUI se
+deprecará. La GUI legada NO es base confiable (revisar antes de reusar). Las sincronizaciones reales
+las hace David a mano (no incluir en pendientes). Detalle completo abajo y en BITACORA (sesión 3).
+
+---
 
 **Login automático de Patreon — COMPLETO ✓ (commit 224475b, pusheado).**
 - [x] `cli.py patreon-login` cableado: login guiado por defecto; `--session-id` = fallback.
@@ -17,14 +28,14 @@ veredicto por archivo en BITACORA. Backend compartido es sólido; la TUI es la s
       (qasync/QSS OK); `bridge.py` podrido (DPG+qasync mezclado, código muerto, estructura de
       carpetas vieja, kemono hardcoded); `native_dialog.py` Linux-only; faltan batch/duplicados/
       compactación/EXT_GROUPS/pending_queue/incremental. Lazy auth Patreon ya funciona gratis.
-- [x] **Saneamiento** (commit pendiente): helpers vivos → `cherry_dl/downloads.py`; redirigidos
+- [x] **Saneamiento** (commit 12ba7c6, pusheado): helpers vivos → `cherry_dl/downloads.py`; redirigidos
       8 imports (cli, organizer, tui×5, artist_detail, test); `gui/bridge.py` y `native_dialog.py`
       BORRADOS; `QFileDialog` reemplaza native_dialog en wizard+settings; `get_event_loop`→
       `get_running_loop`. Smoke imports OK + 18/18 tests.
 - [x] **Fase 2 — Arquitectura objetivo** (decisión: GUI oficial, TUI se deprecará; servicio canónico
       para la GUI). Diseño: `download_service.py` con eventos tipados + flujo de 2 fases.
 - **Fase 3 — Implementación (EN CURSO):**
-  - [x] **Paso 1 — `cherry_dl/download_service.py`** (commit pendiente): servicio async agnóstico de
+  - [x] **Paso 1 — `cherry_dl/download_service.py`** (commit 3e70eb2): servicio async agnóstico de
         UI. Eventos tipados (Log, WorkerStart/Progress/Done, Counters, BatchInfo, …) + `emit` callback.
         Porta el flujo de 2 fases de la TUI (scan→pending_queue→cooldown→productor/workers→diferidos).
         Cancelación por task.cancel(). **Validado headless con BadSpider**: scan 1567 encolados,
