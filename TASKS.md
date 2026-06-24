@@ -9,10 +9,11 @@
    (login guiado) con progreso al log. Cerrar/ver sesión en Ajustes (sección "Cuenta de Patreon").
    `_resolve_auth` queda como fallback si la sesión expira a mitad. ⚠ El login guiado real (nodriver
    abre Brave) NO se pudo probar headless — David debe validarlo en vivo. Lógica del gate sí testeada.
-2. **Feedback de escaneo (PENDIENTE)** — el servicio casi no emite eventos en Fase 1; la GUI parece
-   congelada durante el scan aunque el disco trabaje. Agregar progreso de scan en vivo (evento
-   `ScanProgress` cada N posts → log/status). Visto en vivo con RuiDX (cola creció +97 en 6s sin
-   feedback en la GUI).
+2. **Feedback de escaneo (HECHO)** — nuevo evento `ScanProgress(seen, queued)` emitido cada 25
+   posts en la Fase 1; el dispatcher actualiza la barra de estado inferior ("Escaneando… N vistos ·
+   M en cola"). También se actualiza el estado en `SourceStarted`/`BatchInfo` y se resetea tras el
+   gate de login (ya no queda pegado en "Esperando login…"). Probado: emite en 25/50, ScanComplete OK.
+   ⚠ Falta confirmar en vivo que RuiDX ahora muestra el contador subiendo durante el scan largo.
 3. **Filtro por tipos (PENDIENTE)** — hoy la GUI pide extensiones a mano (tedioso, error fastidia
    la descarga). Portar los checkboxes de `EXT_GROUPS` (ya en `downloads.py`) a `artist_detail_view`
    y al wizard, con `_encode/_decode_profile_filter`.

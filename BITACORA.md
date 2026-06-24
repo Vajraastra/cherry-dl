@@ -23,6 +23,19 @@ ahora llama a `run_profile_download(...)` y traduce los eventos tipados a widget
 - `exclude_mode=False` (la UI de filtro de la GUI es solo-incluir). `resolve_auth=None` por ahora
   → si falta sesión Patreon, el servicio loguea "auth cancelada" y salta la fuente (pendiente Paso 5).
 
+### Feedback de escaneo en la GUI (post-prueba 2: login OK, scan invisible)
+2ª prueba de David: el login guiado funcionó (Brave abrió, "Sesión capturada", guardada). Pero al
+entrar en la Fase 1 ("Filtro cambiado — escaneo completo…") la GUI quedó aparentemente congelada: la
+barra de estado seguía pegada en "Esperando login…" y no había señal de progreso del scan (RuiDX
+escanea miles de posts antes de descargar). Causa: la Fase 1 casi no emitía eventos.
+- Nuevo evento `ScanProgress(seen, queued)` en `download_service`, emitido cada 25 posts dentro del
+  loop de `iter_files`. El dispatcher de `artist_detail_view` lo traduce a la barra de estado
+  inferior ("Escaneando… N posts vistos · M nuevos en cola").
+- El dispatcher ahora también actualiza el estado en `SourceStarted` ("Escaneando {artista}…") y
+  `BatchInfo` ("Descargando N archivo(s)…"); y `_do_download` resetea el estado tras el gate de login
+  ("Preparando descarga…") para no quedar pegado en "Esperando login…".
+- Probado: el servicio emite ScanProgress en seen=25 y 50 (60 archivos), ScanComplete=60.
+
 ### Login Patreon en la GUI — chequeo proactivo + login/logout (post-prueba de David)
 Probando la GUI en vivo, David vio que al descargar de Patreon NO saltaba el login y la descarga
 bajaba (probablemente) solo contenido público en silencio. Diagnóstico: `get_artist_info` resuelve

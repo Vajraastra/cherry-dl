@@ -140,10 +140,18 @@ class ScanComplete:
     pending: int
 
 
+@dataclass(frozen=True)
+class ScanProgress:
+    """Progreso de la Fase 1 (escaneo). La Fase 1 puede tardar minutos sin
+    descargar nada; esto da señal de vida a la UI durante el paginado."""
+    seen: int     # posts/archivos vistos en la API hasta ahora
+    queued: int   # nuevos encolados en pending_queue hasta ahora
+
+
 DownloadEvent = Union[
     Log, WorkersResolved, SourceStarted, Cooldown, BatchInfo,
     WorkerStart, WorkerProgress, WorkerDone, WorkerIdle,
-    Counters, SourceDone, ScanComplete,
+    Counters, SourceDone, ScanComplete, ScanProgress,
 ]
 
 EmitFn = Callable[[DownloadEvent], None]
@@ -297,6 +305,9 @@ async def run_profile_download(
                 try:
                     async for fi in template.iter_files(artist_info, since=scan_since):
                         scan_files_seen += 1
+                        # Señal de vida durante el paginado (Fase 1 no descarga).
+                        if scan_files_seen % 25 == 0:
+                            emit(ScanProgress(scan_files_seen, new_this_scan))
                         key = fi.dedup_key
                         if key in seen_scan:
                             continue

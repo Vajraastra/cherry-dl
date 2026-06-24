@@ -775,6 +775,10 @@ class ArtistDetailView(QWidget):
 
         from ...download_service import run_profile_download
 
+        # Resetea el estado tras el gate de login (evita que quede pegado en
+        # "Esperando login…" durante el pre-scan de hashes).
+        self._lbl_status.setText("Preparando descarga…")
+
         workers = self._workers_spin.value()
         ext_filter = _parse_ext_filter(self._ext_filter.text())
         # Panel inicial con los workers solicitados; el servicio puede reducir
@@ -819,9 +823,12 @@ class ArtistDetailView(QWidget):
         event loop de qasync, por lo que es seguro tocar widgets aqui.
         """
         from ...download_service import (
+            BatchInfo,
             Counters,
             Log,
+            ScanProgress,
             SourceDone,
+            SourceStarted,
             WorkerDone,
             WorkerIdle,
             WorkerProgress,
@@ -845,8 +852,16 @@ class ArtistDetailView(QWidget):
             self._init_worker_slots(ev.count)
         elif isinstance(ev, SourceDone):
             self._refresh_source_row(ev.url_id, ev.file_count)
-        # SourceStarted / Cooldown / BatchInfo / ScanComplete -> ya cubiertos
-        # por los eventos Log que el servicio emite junto a ellos.
+        # ── Actualizaciones de la barra de estado inferior ──────────────────
+        elif isinstance(ev, SourceStarted):
+            self._lbl_status.setText(f"Escaneando {ev.artist} ({ev.site})…")
+        elif isinstance(ev, ScanProgress):
+            self._lbl_status.setText(
+                f"Escaneando… {ev.seen} posts vistos · {ev.queued} nuevos en cola"
+            )
+        elif isinstance(ev, BatchInfo):
+            self._lbl_status.setText(f"Descargando {ev.total} archivo(s)…")
+        # Cooldown / ScanComplete -> cubiertos por los Log que el servicio emite.
 
     async def _ensure_patreon_login_if_needed(self) -> bool:
         """Antes de descargar de Patreon sin sesión, ofrece login en contexto.
