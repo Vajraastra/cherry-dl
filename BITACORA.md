@@ -6,6 +6,46 @@
 
 ---
 
+## 2026-06-24 — Login de Patreon: cableado del CLI + auth perezosa
+
+### Hecho
+1. **`cli.py patreon-login` cableado al login guiado.** Por defecto abre el navegador real
+   (`find_browser()` + `guided_login_patreon()`) y captura `session_id` por CDP; `--session-id`
+   queda como fallback manual. Si no hay navegador instalado, mensaje claro hacia el modo manual.
+   - Quitados los caracteres `→` del docstring: `typer`/`rich` los renderiza en `--help` y
+     reventaban con `UnicodeEncodeError` en una consola Windows cp1252 (no-UTF8).
+   - **Probado e2e**: abrió Brave, "Sesión capturada", guardó `session.json`, exit 0.
+
+2. **Auth perezosa en `auth/patreon.py:ensure_patreon_session()`.** Petición del usuario: el login
+   no debe requerir un comando/flag previo, sino dispararse solo al usar un perfil de Patreon.
+   - Nueva firma: `ensure_patreon_session(*, allow_guided=True, on_status=None)`.
+   - Paso 3 nuevo (antes de `raise NeedsManualAuth`): si `allow_guided` y `find_browser()` halla
+     navegador → `await guided_login_patreon()` y retorna las cookies capturadas.
+   - Como el template (`templates/patreon.py:120`) llama `ensure_patreon_session()` en cada
+     descarga/sync, el navegador se abre automáticamente cuando falta sesión — en CLI **y** TUI.
+   - **Backend puro, TUI intacta.** El modal `NeedsManualAuth` de la TUI queda como fallback para
+     el caso sin-navegador o login cancelado.
+
+3. **Eliminado el TTL de 30 días.** `load_patreon_cookies()` ya no caduca por reloj; la sesión
+   vale hasta que Patreon devuelva 401/403 (manejado en `templates/patreon.py:215` y `289`, que
+   ya llamaban `clear_patreon_session()`). Combinado con la auth perezosa, el re-login es
+   totalmente automático: sesión limpia → próximo uso abre el navegador (perfil persistente, ya
+   logueado) → captura en segundos.
+   - Quitada la constante `_SESSION_TTL`. `_saved_at` se conserva solo como metadato informativo.
+   - Actualizados docstrings/mensajes que mencionaban "30 días" (cli.py, auth/patreon.py,
+     templates/patreon.py — este último además decía "Playwright", ya obsoleto).
+   - **Persistencia en dos capas**: (1) `session.json` sin caducidad → el navegador no se reabre;
+     (2) perfil `~/.cherry-dl/browser-profile` persistente → el flujo tedioso de Google (email+código)
+     solo ocurre la primera vez. Re-login tras 401 reusa el perfil, sin repetir Google.
+
+### Notas / pendientes
+- nodriver deja `ResourceWarning: unclosed transport` (I/O on closed pipe) al cerrar en Windows.
+  Es ruido del teardown del subprocess del navegador; no afecta el resultado (exit 0). Suprimir si molesta.
+- Falta probar el lazy path real: borrar sesión + `cherry-dl download <url_patreon>` → debe auto-abrir login.
+- Pixiv conserva su TTL de 30 días (no se tocó; mismo patrón si se quiere replicar).
+
+---
+
 ## 2026-06-23 (sesión 2) — Recuperación de biblioteca + auth Patreon (login guiado)
 
 ### Estado: PAUSADO en punto seguro. ← LEER PARA RETOMAR

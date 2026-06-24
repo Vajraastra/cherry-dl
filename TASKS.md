@@ -1,13 +1,19 @@
 # TASKS — cherry-dl
 
-## ← RETOMAR AQUÍ (handoff 2026-06-23 sesión 2)
+## ← RETOMAR AQUÍ (handoff 2026-06-24)
 
-**Integración del login guiado de Patreon — EN CURSO.** Detalle completo en BITACORA
-("sesión 2"). Backend HECHO (sin commitear): `auth/browser_login.py`,
-`auth/patreon.py:guided_login_patreon`, `pyproject` (+nodriver). Falta:
-- [ ] **Cablear `cli.py` `patreon-login`** → default = login guiado; `--session-id` = fallback.
-      (`cli.py` intacto en versión manual; la edición no llegó a aplicarse.)
-- [ ] Probar `cherry-dl patreon-login` guiado end-to-end + sincronizar.
+**Login guiado de Patreon — CABLEADO + AUTOMÁTICO (sin commitear).**
+- [x] **`cli.py patreon-login` cableado**: login guiado por defecto; `--session-id` = fallback
+      manual. Quitados los `→` del docstring (rompían `--help` en consola cp1252).
+- [x] **Probado e2e**: `patreon-login` abrió Brave, capturó `session_id`, guardó session.json (exit 0).
+- [x] **Login perezoso (lazy auth)**: `auth/patreon.py:ensure_patreon_session(allow_guided=True)`
+      ahora dispara el login guiado solo cuando falta sesión y hay navegador → al sincronizar un
+      perfil de Patreon la app abre el navegador SOLA, sin comando previo ni flag. Es backend puro;
+      la TUI no se tocó (su modal NeedsManualAuth queda como fallback sin-navegador).
+- [ ] **Commit** de esta sesión (cli.py + auth/patreon.py).
+- [ ] Probar lazy auth real: borrar sesión + `cherry-dl download <url_patreon>` → debe auto-abrir login.
+- [ ] Ruido menor: nodriver deja ResourceWarnings de "unclosed transport" al cerrar en Windows
+      (no afecta resultado, exit 0). Suprimir si molesta.
 - [ ] **NO tocar TUI**; tras confirmar compat dual-OS → transición a **PySide6**.
 - [ ] Re-sync TOTAL del BadSpider real (mal organizado); 9 folders en `.recovery/recovery_review.txt`.
 

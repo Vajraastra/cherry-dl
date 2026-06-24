@@ -582,35 +582,58 @@ async def _reindex(download_dir: Optional[str], dry_run: bool) -> None:
 @app.command()
 def patreon_login(
     session_id: Optional[str] = typer.Option(
-        None, "--session-id", help="Valor de la cookie 'session_id' de patreon.com"
+        None, "--session-id", help="Modo manual: valor de la cookie 'session_id' de patreon.com"
     ),
     device_id: Optional[str] = typer.Option(
-        None, "--device-id", help="(Opcional) cookie 'patreon_device_id'"
+        None, "--device-id", help="(Manual, opcional) cookie 'patreon_device_id'"
     ),
 ):
     """
-    Guarda manualmente la sesión de Patreon (session_id).
+    Inicia sesión en Patreon.
 
-    Necesario en Windows: el cifrado App-Bound de Brave/Chrome impide leer las
-    cookies automáticamente. Obtené el valor en el navegador: F12 → Application
-    → Cookies → https://www.patreon.com → copiá el valor de 'session_id'.
+    Por defecto abre tu navegador REAL (Brave/Edge/Chrome) en un perfil dedicado:
+    iniciás sesión normalmente y la cookie se captura por CDP. Esto esquiva el
+    cifrado App-Bound de Windows y los bloqueos de login con Google.
+
+    Fallback manual (--session-id): pegá el valor de la cookie. Obtenelo en el
+    navegador con F12 > Application > Cookies > https://www.patreon.com.
     """
-    from .auth.patreon import save_patreon_cookies, load_patreon_cookies
+    from .auth.patreon import save_patreon_cookies, guided_login_patreon
+    from .auth.browser_login import find_browser
 
-    if not session_id:
-        session_id = typer.prompt(
-            "Pegá el valor de la cookie 'session_id' de patreon.com",
-            hide_input=True,
+    # ── Modo manual explícito ──────────────────────────────────────────────
+    if session_id is not None:
+        sid = session_id.strip()
+        if not sid:
+            console.print("[red]session_id vacío — cancelado.[/]")
+            raise typer.Exit(1)
+        cookies = {"session_id": sid}
+        if device_id:
+            cookies["patreon_device_id"] = device_id.strip()
+        save_patreon_cookies(cookies)
+        console.print("[green]✓ Sesión de Patreon guardada en session.json (vale hasta que Patreon la rechace).[/]")
+        console.print("[dim]Probala con: cherry-dl download <url_patreon>[/]")
+        return
+
+    # ── Login guiado (por defecto) ─────────────────────────────────────────
+    if find_browser() is None:
+        console.print(
+            "[yellow]No se encontró Brave/Edge/Chrome instalado.[/] "
+            "Usá el modo manual:\n  [bold]cherry-dl patreon-login --session-id <valor>[/]"
         )
-    session_id = (session_id or "").strip()
-    if not session_id:
-        console.print("[red]session_id vacío — cancelado.[/]")
         raise typer.Exit(1)
 
-    cookies = {"session_id": session_id}
-    if device_id:
-        cookies["patreon_device_id"] = device_id.strip()
-    save_patreon_cookies(cookies)
+    console.print("[cyan]Abriendo el navegador para iniciar sesión en Patreon…[/]")
+    cookies = asyncio.run(
+        guided_login_patreon(on_status=lambda m: console.print(f"[dim]· {m}[/]"))
+    )
+    if not cookies or not cookies.get("session_id"):
+        console.print(
+            "[red]No se capturó la sesión.[/] Probá de nuevo o usá "
+            "[bold]--session-id[/] para el modo manual."
+        )
+        raise typer.Exit(1)
+
     console.print("[green]✓ Sesión de Patreon guardada en session.json (TTL 30 días).[/]")
     console.print("[dim]Probala con: cherry-dl download <url_patreon>[/]")
 

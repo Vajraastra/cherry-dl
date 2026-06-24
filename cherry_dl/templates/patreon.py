@@ -1,9 +1,9 @@
 """
 Template para Patreon.
 
-Autenticación: Playwright (browser visible) → session_id cookie persistida
-               en ~/.cherry-dl/session.json bajo la clave 'patreon'.
-               Solo se ejecuta la primera vez o al expirar (30 días).
+Autenticación: login guiado (navegador real + CDP) → session_id cookie
+               persistida en ~/.cherry-dl/session.json bajo la clave 'patreon'.
+               Sin caducidad por tiempo: solo se rehace si Patreon la rechaza (401).
 
 API: endpoints internos JSON:API de www.patreon.com/api.
      - GET /api/campaigns?filter[vanity]=<username>  → campaign_id

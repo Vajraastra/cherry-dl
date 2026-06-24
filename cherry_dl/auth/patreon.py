@@ -2,22 +2,19 @@
 Autenticación con Patreon via cookies del navegador del sistema.
 
 Flujo en ensure_patreon_session():
-  1. session.json["patreon"] válido (<30 días)  →  usar directamente
+  1. session.json["patreon"] válido  →  usar directamente
   2. browser_cookie3: leer cookies de Firefox/Chrome/Brave/Edge
      →  si encuentra session_id: guardar en session.json y continuar
-  3. raise NeedsManualAuth  →  TUI muestra PatreonAuthModal
-
-PatreonAuthModal (en tui/app.py):
-  - Botón "Abrir patreon.com/login" → webbrowser.open() (stdlib)
-  - Botón "Ya inicié sesión"        → reintenta browser_cookie3
-  - Al encontrar session_id: guarda en session.json y continúa
+  3. login guiado (navegador real + CDP)  →  captura session_id y continúa
+  4. raise NeedsManualAuth  →  sin navegador; TUI muestra PatreonAuthModal
 
 Firefox se intenta antes que Chrome en Linux porque no requiere keyring.
 Chrome/Brave/Edge requieren GNOME Keyring o KWallet desbloqueados
 (siempre disponibles en sesiones de escritorio activas).
 
-TTL de sesión guardada: 30 días. Al recibir 401 se llama
-clear_patreon_session() y el flujo se reinicia desde el paso 2.
+Sin caducidad por tiempo: la sesión guardada vale hasta que Patreon la
+rechace (401). Ahí el template llama clear_patreon_session() y el siguiente
+uso reinicia el flujo desde el paso 2 (re-login automático).
 """
 
 from __future__ import annotations
@@ -28,7 +25,6 @@ from ..config import load_session, save_session
 
 # ── Constantes ────────────────────────────────────────────────────────────────
 
-_SESSION_TTL = 30 * 24 * 3600   # 30 días en segundos
 _SESSION_KEY = "patreon"
 
 # Cookies relevantes de patreon.com que se persisten
@@ -63,14 +59,15 @@ class NeedsManualAuth(Exception):
 def load_patreon_cookies() -> dict[str, str] | None:
     """
     Carga cookies de Patreon guardadas en session.json.
-    Retorna None si no existen, faltan datos esenciales, o han expirado.
+
+    Sin caducidad por tiempo: la sesión vale hasta que Patreon la rechace
+    (401/403), momento en que el template llama clear_patreon_session() y el
+    siguiente uso dispara el login guiado automáticamente. Retorna None si no
+    existen o falta el session_id.
     """
     data = load_session()
     block = data.get(_SESSION_KEY)
     if not isinstance(block, dict):
-        return None
-
-    if time.time() - block.get("_saved_at", 0) > _SESSION_TTL:
         return None
 
     cookies = {k: v for k, v in block.items() if not k.startswith("_")}
@@ -102,15 +99,24 @@ def refresh_patreon_cookies(new_cookies: dict[str, str]) -> None:
     save_patreon_cookies({**existing, **new_cookies})
 
 
-async def ensure_patreon_session() -> dict[str, str]:
+async def ensure_patreon_session(
+    *, allow_guided: bool = True, on_status=None
+) -> dict[str, str]:
     """
-    Garantiza una sesión válida de Patreon.
+    Garantiza una sesión válida de Patreon (autenticación perezosa).
 
     Pasos:
-      1. session.json válido  →  retorna cookies guardadas
-      2. browser_cookie3      →  lee del browser (funciona en Linux; en Windows
-                                  el cifrado App-Bound lo bloquea)
-      3. raise NeedsManualAuth →  el llamador dispara guided_login_patreon()
+      1. session.json válido         →  retorna cookies guardadas
+      2. browser_cookie3             →  lee del browser (funciona en Linux; en
+                                         Windows el cifrado App-Bound lo bloquea)
+      3. login guiado (allow_guided) →  abre el navegador real y captura por CDP
+      4. raise NeedsManualAuth       →  sin navegador o login cancelado/fallido
+
+    El paso 3 hace que el login sea automático: al sincronizar un perfil de
+    Patreon sin sesión, la app abre el navegador sola — no hace falta correr
+    `patreon-login` por adelantado. `allow_guided=False` lo desactiva (p. ej.
+    para contextos no interactivos que prefieran manejar NeedsManualAuth ellos
+    mismos).
     """
     existing = load_patreon_cookies()
     if existing:
@@ -120,6 +126,14 @@ async def ensure_patreon_session() -> dict[str, str]:
     if from_browser:
         save_patreon_cookies(from_browser)
         return from_browser
+
+    if allow_guided:
+        from .browser_login import find_browser
+
+        if find_browser() is not None:
+            cookies = await guided_login_patreon(on_status=on_status)
+            if cookies and cookies.get("session_id"):
+                return cookies
 
     raise NeedsManualAuth(
         "No se encontró sesión activa de Patreon en el navegador."
