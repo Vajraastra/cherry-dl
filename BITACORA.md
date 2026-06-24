@@ -6,6 +6,39 @@
 
 ---
 
+## 2026-06-24 (sesión 4) — Fase 3 Pasos 2-3: GUI sobre el servicio + prueba e2e qasync
+
+### Paso 2 — EXT_GROUPS compartido
+`EXT_GROUPS` movido de `tui/app.py` a `cherry_dl/downloads.py` (módulo canónico compartido por
+servicio y GUI). `tui/app.py` y `tests/test_ext_groups.py` reimportan. 18/18 tests. (commit 8ae7e80)
+
+### Paso 3 — artist_detail_view delega en download_service
+`ArtistDetailView._do_download` pasó de ~520 líneas (reimplementación inline del flujo) a 50:
+ahora llama a `run_profile_download(...)` y traduce los eventos tipados a widgets en el nuevo
+`_on_service_event`. Detalles:
+- **Throttle 4 Hz** añadido en `_worker_progress`: el servicio emite `WorkerProgress` por cada
+  chunk (~160/s/worker a 10 MB/s); sin throttle satura el event loop de qasync con ops Qt. (El
+  throttle vivía antes dentro del callback inline; al delegar, debe vivir en el handler de UI.)
+- `_parse_ext_filter` importado de `downloads`; borrados imports muertos `add_file`/`next_counter`.
+- `exclude_mode=False` (la UI de filtro de la GUI es solo-incluir). `resolve_auth=None` por ahora
+  → si falta sesión Patreon, el servicio loguea "auth cancelada" y salta la fuente (pendiente Paso 5).
+
+### Prueba e2e (headless, bajo qasync real) — TODO VERDE
+Riesgo del Paso 3: que el servicio async corra bien bajo el loop fusionado Qt+asyncio de qasync y
+que `emit` (callback síncrono que toca widgets) funcione. El scan real de Patreon es 2-fases
+secuencial (escanea TODO antes de descargar → minutos/horas), así que para validar *la costura*
+sin esperas usé un **template stub** sirviendo archivos pequeños desde un `http.server` local, con
+índice y carpeta temporales (no se tocó la biblioteca real). Se ejercitó `ArtistDetailView._do_download`
+sobre `QEventLoop` de qasync con plataforma Qt `offscreen`:
+- **Completación**: 5/5 archivos en disco, 5/5 filas de catálogo, 5 callbacks de progreso, log poblado.
+- **Cancelación**: cancelado tras 3 descargas (server con delay 0.4s/req para cancelar a mitad) →
+  3 archivos en disco, `task.done()==True`, status "Cancelado por el usuario", sin deadlock ni
+  excepciones huérfanas.
+- Nota menor (no regresión): el status final muestra "Listo" en vez de "Completado" porque
+  `_do_download` cierra con `_load_async()` que resetea el label; el resumen queda en el log.
+
+---
+
 ## 2026-06-24 (sesión 2) — Migración a PySide6: auditoría + saneamiento
 
 ### Contexto

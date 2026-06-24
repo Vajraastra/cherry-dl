@@ -3,10 +3,9 @@
 ## ← RETOMAR AQUÍ (handoff 2026-06-24 — fin sesión 3)
 
 **EMPEZAR POR: Fase 3, Paso 4** — `profiles_view` + columna Estado (pending_count por perfil).
-Pasos 2 y 3 hechos. ⚠ PENDIENTE PRUEBA e2e en GUI real: `artist_detail_view` ya delega en el
-servicio pero falta abrir la GUI y descargar de verdad (el servicio está validado headless, no
-en Qt/qasync). `resolve_auth` aún sin cablear → si falta sesión Patreon, loguea "auth cancelada".
-Commits 8ae7e80 (Paso 2) + Paso 3 locales, pendiente push.
+Pasos 2 y 3 hechos y **validados e2e bajo qasync** (completación + cancelación, ver BITACORA).
+`resolve_auth` aún sin cablear → si falta sesión Patreon, loguea "auth cancelada" (pendiente Paso 5
+wizard/auth). Commits 8ae7e80 (Paso 2) + Paso 3 locales, pendiente push.
 
 Contexto rápido: el servicio de descarga `cherry_dl/download_service.py` ya existe, está
 **validado headless con BadSpider** y es la base de la GUI. La GUI será la UI oficial; la TUI se
@@ -52,7 +51,8 @@ veredicto por archivo en BITACORA. Backend compartido es sólido; la TUI es la s
         `_worker_progress` (el servicio emite por chunk, no throttlea). Importa `_parse_ext_filter`
         de `downloads`; eliminados `add_file`/`next_counter` (inline download borrado). `exclude_mode`
         fijo en False (UI solo-incluir). `resolve_auth=None` por ahora. Import GUI OK + 18/18 tests.
-        ⚠ Falta prueba e2e en GUI real.
+  - [x] **Prueba e2e Paso 3** (headless qasync, template stub + HTTP local, index/carpeta temp):
+        completación 5/5 archivos+catálogo+progreso; cancelación tras 3 → task limpia, sin deadlock.
   - [ ] Paso 4 — `profiles_view` + columna Estado. Paso 5 — wizard fix. Paso 6 — batch_view.
         Paso 7 — duplicates_view. Paso 8 — lanzador GUI por defecto + deprecación TUI.
 - [ ] Bugs del legacy a corregir en el port: estructura de carpetas vieja en wizard (preview L279);
