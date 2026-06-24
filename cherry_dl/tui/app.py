@@ -43,6 +43,7 @@ from ..catalog import (
     pending_count, pending_url_exists, remove_pending, set_meta_int, url_exists,
 )
 from ..config import INDEX_DB, load_config, save_config
+from ..downloads import EXT_GROUPS
 from ..util import safe_dirname
 from ..index import (
     add_exclusion,
@@ -63,16 +64,7 @@ from ..index import (
 
 
 # ── Grupos de extensiones para filtro de batch ─────────────────────────────
-
-EXT_GROUPS: dict[str, tuple[str, set[str]]] = {
-    "images":  ("Imágenes",          {"jpg","jpeg","png","webp","bmp","tiff","tif","avif","jxl"}),
-    "anim":    ("Animaciones",        {"gif","apng"}),
-    "video":   ("Video",              {"mp4","webm","mkv","avi","mov","wmv","flv","m4v","mpg","mpeg"}),
-    "audio":   ("Audio",              {"mp3","flac","ogg","wav","aac","m4a","opus","wma"}),
-    "zip":     ("Comprimidos",        {"zip","rar","7z","tar","gz","bz2","xz","cbz","cbr"}),
-    "docs":    ("Documentos",         {"pdf","doc","docx","txt","epub"}),
-    "project": ("Archivos proyecto",  {"psd","clip","xcf","kra","procreate","sai","sai2","ai","ora","mdp"}),
-}
+# EXT_GROUPS vive en cherry_dl.downloads (compartido servicio/GUI); se importa arriba.
 
 
 def _encode_profile_filter(group_ids: list[str], custom: str) -> str:

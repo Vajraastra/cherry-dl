@@ -12,8 +12,7 @@ from pathlib import Path
 # Asegurar que el paquete sea importable desde la raíz del proyecto
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from cherry_dl.tui.app import EXT_GROUPS
-from cherry_dl.downloads import _parse_ext_filter, _passes_ext_filter
+from cherry_dl.downloads import EXT_GROUPS, _parse_ext_filter, _passes_ext_filter
 
 
 # ── 1. Integridad de EXT_GROUPS ─────────────────────────────────────────────

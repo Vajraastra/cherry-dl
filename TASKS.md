@@ -2,9 +2,9 @@
 
 ## ← RETOMAR AQUÍ (handoff 2026-06-24 — fin sesión 3)
 
-**EMPEZAR POR: Fase 3, Paso 2** — mover `EXT_GROUPS` (dict de grupos de extensiones) de
-`tui/app.py` a `cherry_dl/downloads.py` para compartirlo entre el servicio y la GUI. Luego Paso 3
-(cablear `artist_detail_view` al servicio). Todo pusheado a origin/main hasta el commit 3e70eb2.
+**EMPEZAR POR: Fase 3, Paso 3** — cablear `artist_detail_view` al servicio
+`download_service.py` (handler de eventos tipados). Paso 2 (mover `EXT_GROUPS`) ya hecho.
+Hasta el commit 3e70eb2 pusheado; Paso 2 commiteado localmente, pendiente push.
 
 Contexto rápido: el servicio de descarga `cherry_dl/download_service.py` ya existe, está
 **validado headless con BadSpider** y es la base de la GUI. La GUI será la UI oficial; la TUI se
@@ -43,7 +43,8 @@ veredicto por archivo en BITACORA. Backend compartido es sólido; la TUI es la s
   - [x] **BUG corregido**: deadlock del producer al cancelar — el `finally` encolaba centinelas None
         en cola llena sin consumidores (workers ya cancelados) → colgaba el gather. Fix: centinelas
         solo en terminación normal, no en cancelación. (Latente también en la TUI; no se toca → deprecará.)
-  - [ ] Paso 2 — Filtros EXT_GROUPS compartidos → mover de `tui/app.py` a `downloads.py`.
+  - [x] **Paso 2** — `EXT_GROUPS` movido de `tui/app.py` a `downloads.py` (canónico, compartido
+        servicio/GUI). `tui/app.py` y `tests/test_ext_groups.py` reimportan. 18/18 tests OK.
   - [ ] Paso 3 — `artist_detail_view` delega en el servicio (handler de eventos).
   - [ ] Paso 4 — `profiles_view` + columna Estado. Paso 5 — wizard fix. Paso 6 — batch_view.
         Paso 7 — duplicates_view. Paso 8 — lanzador GUI por defecto + deprecación TUI.

@@ -47,6 +47,20 @@ def build_filename(artist_name: str, counter: int, original_filename: str) -> st
 
 # ── Filtros por extensión ──────────────────────────────────────────────────────
 
+# Grupos de extensiones para el filtro de batch/perfil.
+# Compartido entre el servicio de descarga y las UIs (TUI/GUI).
+# Las extensiones se almacenan SIN punto; el punto lo agrega `_parse_ext_filter`.
+EXT_GROUPS: dict[str, tuple[str, set[str]]] = {
+    "images":  ("Imágenes",          {"jpg","jpeg","png","webp","bmp","tiff","tif","avif","jxl"}),
+    "anim":    ("Animaciones",        {"gif","apng"}),
+    "video":   ("Video",              {"mp4","webm","mkv","avi","mov","wmv","flv","m4v","mpg","mpeg"}),
+    "audio":   ("Audio",              {"mp3","flac","ogg","wav","aac","m4a","opus","wma"}),
+    "zip":     ("Comprimidos",        {"zip","rar","7z","tar","gz","bz2","xz","cbz","cbr"}),
+    "docs":    ("Documentos",         {"pdf","doc","docx","txt","epub"}),
+    "project": ("Archivos proyecto",  {"psd","clip","xcf","kra","procreate","sai","sai2","ai","ora","mdp"}),
+}
+
+
 def _parse_ext_filter(raw: str | None) -> set[str]:
     """
     Convierte una cadena como '.zip, .rar, jpg' en un set normalizado:
