@@ -21,8 +21,21 @@ veredicto por archivo en BITACORA. Backend compartido es sólido; la TUI es la s
       8 imports (cli, organizer, tui×5, artist_detail, test); `gui/bridge.py` y `native_dialog.py`
       BORRADOS; `QFileDialog` reemplaza native_dialog en wizard+settings; `get_event_loop`→
       `get_running_loop`. Smoke imports OK + 18/18 tests.
-- [ ] **Fase 2 — Arquitectura objetivo**: servicio de descarga compartido (productor/workers +
-      pending_queue + incremental) reutilizable por GUI y TUI; esqueleto de vistas; plan de port.
+- [x] **Fase 2 — Arquitectura objetivo** (decisión: GUI oficial, TUI se deprecará; servicio canónico
+      para la GUI). Diseño: `download_service.py` con eventos tipados + flujo de 2 fases.
+- **Fase 3 — Implementación (EN CURSO):**
+  - [x] **Paso 1 — `cherry_dl/download_service.py`** (commit pendiente): servicio async agnóstico de
+        UI. Eventos tipados (Log, WorkerStart/Progress/Done, Counters, BatchInfo, …) + `emit` callback.
+        Porta el flujo de 2 fases de la TUI (scan→pending_queue→cooldown→productor/workers→diferidos).
+        Cancelación por task.cancel(). **Validado headless con BadSpider**: scan 1567 encolados,
+        descarga real + catalogar + remove_pending, cap workers=2, cancelación limpia en 1s.
+  - [x] **BUG corregido**: deadlock del producer al cancelar — el `finally` encolaba centinelas None
+        en cola llena sin consumidores (workers ya cancelados) → colgaba el gather. Fix: centinelas
+        solo en terminación normal, no en cancelación. (Latente también en la TUI; no se toca → deprecará.)
+  - [ ] Paso 2 — Filtros EXT_GROUPS compartidos → mover de `tui/app.py` a `downloads.py`.
+  - [ ] Paso 3 — `artist_detail_view` delega en el servicio (handler de eventos).
+  - [ ] Paso 4 — `profiles_view` + columna Estado. Paso 5 — wizard fix. Paso 6 — batch_view.
+        Paso 7 — duplicates_view. Paso 8 — lanzador GUI por defecto + deprecación TUI.
 - [ ] Bugs del legacy a corregir en el port: estructura de carpetas vieja en wizard (preview L279);
       `rename`→`replace`; portar EXT_GROUPS/pending_queue/incremental a la GUI.
 

@@ -49,6 +49,41 @@ por GUI y TUI — hoy duplicado entre tui/app.py y artist_detail_view.py. Luego 
 
 ---
 
+## 2026-06-24 (sesión 3) — Decisión: GUI oficial + servicio de descarga compartido
+
+### Decisión de rumbo
+La GUI PySide6 será la **UI oficial**; la TUI Textual se **deprecará** cuando la GUI esté lista.
+La TUI pasa a ser solo fuente de lógica probada. El backend es compartido y sólido.
+
+### Fase 3 paso 1 — `cherry_dl/download_service.py` (servicio compartido)
+Servicio async **agnóstico de UI**: la UI pasa un callback `emit(evento)` y recibe eventos tipados
+(Log, WorkersResolved, SourceStarted, Cooldown, BatchInfo, WorkerStart/Progress/Done/Idle, Counters,
+SourceDone, ScanComplete). Todo corre en un solo event loop (qasync) → emit síncrono, sin AsyncBridge.
+
+`run_profile_download(profile, *, workers, ext_filter, exclude_mode, force_full, update_only,
+scan_only, emit, config, resolve_auth)` porta el flujo de 2 fases de la TUI:
+scan API (iter_files since=last_synced) → pending_queue → cooldown → productor/workers (dedup
+atómico in_progress_hashes, remove_pending por éxito) → cola diferida → update last_synced.
+Cancelación: cancelar la task que await-ea la función (propaga CancelledError limpiamente).
+
+### Validación headless con BadSpider (index.db redirigido a temporal — biblioteca real intacta)
+- Fase 1 (scan_only): 1567 imágenes encoladas en pending_queue.
+- Fase 2: retoma cola sin re-escanear, cap workers=2 (Patreon), descarga real + catalogar +
+  remove_pending. 30 imgs en disco = 30 catalogadas (consistencia perfecta).
+- Cancelación graceful: cierre limpio en 1.0s.
+
+### BUG real encontrado y corregido — deadlock del producer al cancelar
+Diagnóstico vía faulthandler + Task.print_stack: al cancelar, los workers mueren y dejan de
+consumir la cola; el `producer` en su `finally` intentaba `await file_queue.put(None)` (centinelas)
+en una **cola llena sin consumidores** → put colgado para siempre → el gather padre lo esperaba
+eternamente. El proceso nunca cerraba tras cancel.
+Fix: encolar los centinelas None **solo en terminación normal** (al final del try), no en el
+`finally`; en cancelación el except deja propagar el cancel sin tocar la cola.
+NOTA: el mismo patrón está latente en `tui/app.py:_do_download` (líneas ~2649) y en la GUI legada
+`artist_detail_view._do_download`; no se corrigen porque ambas se reemplazan/deprecan.
+
+---
+
 ## 2026-06-24 — Login de Patreon: cableado del CLI + auth perezosa
 
 ### Hecho
