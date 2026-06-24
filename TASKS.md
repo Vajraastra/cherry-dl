@@ -1,6 +1,39 @@
 # TASKS — cherry-dl
 
-## Estado actual (2026-03-24)
+## Estado actual (2026-06-23)
+
+### Compatibilidad Windows 11 + biblioteca portable — COMPLETA ✓ (2026-06-23)
+
+**Fase 1 — Windows-now (mecánico)**
+- [x] `run.sh` portable: detección de OS (`uname`), `uv.exe`+`Scripts/` en Windows
+- [x] Filosofía cero-deps-sistema: Python standalone en `.tools/python` (`UV_PYTHON_INSTALL_DIR`)
+- [x] uv en Windows vía `curl`+`unzip` (no `install.ps1` — PowerShell 5.1 falla desde Git Bash)
+- [x] `run.bat`: wrapper que delega a `run.sh` vía Git Bash
+- [x] `.gitignore` `.tools/`; `git rm --cached .tools` (binarios ELF Linux); `.gitattributes` `*.sh eol=lf`
+- [x] `rename()` → `replace()` en engine.py, catalog.py (compactación) y 5 sitios de tui/app.py
+- [x] Portapapeles Windows en `_read_clipboard()` (`powershell Get-Clipboard`)
+- [x] Smoke test Win11: `run.sh --help` bootstrap completo + CLI corre
+
+**Fase 2 — Capa de portabilidad (biblioteca compartida)**
+- [x] `catalog.py`: tabla `profile_meta` + `write_profile_meta`/`read_profile_meta`
+- [x] `index.py`: `sync_profile_meta` conectado a todas las mutaciones de perfil
+- [x] `index.py`: `export_all_meta` + `reindex_from_folders` (idempotente, no destructivo)
+- [x] `cli.py`: comandos `export-meta` y `reindex [dir] [--dry-run]`
+- [x] `tui/app.py`: botón "⟲ Reindexar" + auto-reindex al arrancar con índice vacío
+- [x] Test funcional roundtrip: meta write/read, reindex con rutas locales, last_synced, idempotencia
+
+**Fase 3 — Endurecimiento de nombres**
+- [x] `cherry_dl/util.py`: `safe_dirname()` único y endurecido (chars ilegales, reservados Windows)
+- [x] Los 4 `_safe_dirname` duplicados delegan en el helper; `_auto_folder` de la TUI sanitiza
+- [x] Caveats NTFS documentados en BITACORA (case-insensitive, límite 260 chars)
+
+**Pendiente**
+- [ ] Prueba cross-OS real con la partición montada en Win11 y Bazzite
+- [ ] Migración a PySide6 (fase futura — compat ya vive en backend)
+
+---
+
+## Estado anterior (2026-04-09)
 
 ### Fase 1 — COMPLETA ✓
 - [x] Scaffolding del proyecto
@@ -251,6 +284,51 @@ La compactación es puramente de organización (numeración sin huecos).
 - [x] `tests/test_ext_groups.py`: 18 tests (integridad de grupos + lógica de filtro + casos edge)
 - [x] BUG: filtro no se aplicaba en `_download_url` → ítems de `pending_queue` sin filtro se descargaban igual
 - [x] BUG: extensiones sin punto en `include_exts` → `Path.suffix` devuelve con punto → nada coincidía → todo se rechazaba
+
+### Sistema de filtro por tipo de archivo — COMPLETA ✓ (2026-04-09)
+- [x] `tui/app.py`: `ArtistScreen` reemplaza `Input` de texto con checkboxes de `EXT_GROUPS` (idéntico a `BatchScreen`)
+- [x] `tui/app.py`: `_encode_profile_filter` / `_decode_profile_filter` — serialización JSON con backward-compat
+- [x] `tui/app.py`: `ProfileFilterModal` — modal de config por perfil invocado desde batch
+- [x] `tui/app.py`: `BatchScreen` checkbox "usar config por perfil" + `_configure_and_start_batch()`
+- [x] `catalog.py`: `pending_count(ext_filter=...)` — cuenta pendientes filtrando por extensión via SQL LIKE
+- [x] `catalog.py`: `clean_pending_catalog_overlap()` — limpia entradas de pending_queue ya descargadas
+- [x] `tui/app.py`: fingerprint de filtro (`scan_filter_{pu_id}`) — detecta cambio de filtro entre sesiones
+- [x] `tui/app.py`: `_matching_pending` — cuenta pendientes que coinciden con filtro actual
+- [x] `tui/app.py`: condición de reanudación mejorada — requiere `_matching_pending > 0 and not _filter_changed`
+- [x] `tui/app.py`: `_scan_since = None` cuando filtro cambia — fuerza scan completo ignorando `url_since`
+- [x] `tui/app.py`: fingerprint solo se guarda cuando `_scan_files_seen > 0` (evita marcar scan vacío como exitoso)
+- [x] `tui/app.py`: pending count en lista de perfiles refleja filtro activo del perfil
+- [x] Mensajes `DBG` de depuración eliminados
+
+### Sistema de detección y fusión de duplicados — PENDIENTE PRUEBA ⚠ (2026-04-09)
+
+**Código implementado — falta prueba end-to-end.**
+
+#### Backend (COMPLETO ✓)
+- [x] `catalog.py`: `compare_by_hash_join(folder_a, folder_b)` — SQL ATTACH + INNER JOIN, sin I/O de disco
+- [x] `catalog.py`: `migrate_unique_files(folder_src, folder_dst)` — mueve archivos únicos con nuevo counter
+- [x] `index.py`: tabla `profile_exclusions` + migración en `init_index`
+- [x] `index.py`: `add_exclusion()` / `get_exclusions()`
+- [x] `index.py`: `merge_profiles()` actualizado — deduplica URLs, limpia exclusiones del eliminado
+
+#### TUI (COMPLETO ✓)
+- [x] `tui/app.py`: `DuplicateScreen` — pantalla completa con fase 1 + fase 2
+- [x] `tui/app.py`: `_scan_phase1()` — compara URLs (site+artist_id) + nombres para todos los pares N×N
+- [x] `tui/app.py`: `_scan_phase2()` — hash join SQL bajo demanda, actualiza tablas en tiempo real
+- [x] `tui/app.py`: `_execute_merges()` — migra archivos, fusiona índice, gestiona huérfanos, ofrece compactar
+- [x] `tui/app.py`: `HashScanWarningModal`, `OrphanActionModal`, `CompactAfterMergeModal`
+- [x] `tui/app.py`: `_url_overlap()`, `_dup_keep_remove()`, `_handle_orphans()`, `_compact_folders()`
+- [x] `tui/app.py`: Eliminados `SelectProfileModal`, `CompareResultModal`, `MergeConfirmModal`
+- [x] `tui/theme.tcss`: estilos de `DuplicateScreen`
+
+#### Pendiente para próxima sesión ← EMPEZAR AQUÍ
+- [ ] **Prueba DuplicateScreen** — abrir TUI, verificar que fase 1 se ejecuta y puebla tablas
+- [ ] **Prueba de fusión** — dos perfiles de prueba, fusión automática, verificar archivos + catalog + index
+- [ ] **Prueba de fase 2** — perfiles con archivos en común, verificar coverage del hash join
+- [ ] **Auto-check en creación de perfil** — al finalizar `NewProfileModal._create_profile`, correr fase 1 solo para el perfil nuevo vs todos los demás; notificar si hay matches
+- [ ] **Commit** de toda la sesión 2026-04-09
+
+---
 
 ### Features
 - [ ] Verificación periódica automática (scheduler interno)

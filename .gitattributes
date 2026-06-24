@@ -1,2 +1,11 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Normalización explícita cross-OS.
+# Los scripts shell DEBEN ser LF aunque se clonen en Windows (Git Bash los
+# ejecuta; CRLF rompería el shebang y los `case`/here-docs).
+*.sh   text eol=lf
+# Los .bat se ejecutan por cmd.exe → CRLF.
+*.bat  text eol=crlf
+# Binarios: nunca tocar.
+*.db   binary

@@ -611,6 +611,107 @@ NewProfileModal, AddUrlModal {
     background: #6a5a2a;
 }
 
+/* ── Filtro por perfil (ArtistScreen) ─────────────────────────────────────── */
+
+#artist-filter-groups {
+    height: auto;
+    padding: 0 1;
+    margin-bottom: 0;
+    align: left middle;
+}
+
+#artist-filter-groups Checkbox {
+    margin-right: 2;
+    background: transparent;
+    color: #c0c0d8;
+}
+
+#artist-filter-groups Checkbox:focus {
+    color: #e75480;
+}
+
+#artist-filter-groups Checkbox.-on {
+    color: #e75480;
+}
+
+#artist-filter-custom-row {
+    height: 3;
+    align: left middle;
+    margin-bottom: 1;
+}
+
+/* ── Modo per-perfil (BatchScreen) ────────────────────────────────────────── */
+
+#batch-filter-mode {
+    height: 3;
+    align: left middle;
+    padding: 0 1;
+    margin-bottom: 1;
+}
+
+#batch-filter-mode Checkbox {
+    background: transparent;
+    color: #aaaacc;
+}
+
+#batch-filter-mode Checkbox.-on {
+    color: #e75480;
+}
+
+/* ── ProfileFilterModal ───────────────────────────────────────────────────── */
+
+ProfileFilterModal {
+    align: center middle;
+}
+
+#pfm-container {
+    background: #1a1a2e;
+    border: solid #4a4a7a;
+    padding: 2 3;
+    width: 70;
+    height: auto;
+}
+
+#pfm-title {
+    color: #e75480;
+    text-style: bold;
+    margin-bottom: 1;
+    height: auto;
+}
+
+#pfm-groups {
+    height: auto;
+    padding: 0 0;
+    margin-bottom: 1;
+    align: left middle;
+}
+
+#pfm-groups Checkbox {
+    margin-right: 2;
+    background: transparent;
+    color: #c0c0d8;
+}
+
+#pfm-groups Checkbox.-on {
+    color: #e75480;
+}
+
+#pfm-custom-row {
+    height: 3;
+    align: left middle;
+    margin-bottom: 1;
+}
+
+#pfm-buttons {
+    height: 3;
+    align: right middle;
+    margin-top: 1;
+}
+
+#pfm-buttons Button {
+    margin-left: 1;
+}
+
 /* ── SettingsScreen ────────────────────────────────────────────────────────── */
 
 #settings-grid {
@@ -631,3 +732,53 @@ NewProfileModal, AddUrlModal {
     margin-bottom: 0;
 }
 
+
+/* ── DuplicateScreen ─────────────────────────────────────────────────────── */
+
+#dup-main {
+    padding: 1 2;
+    height: 1fr;
+}
+
+#dup-status {
+    margin-bottom: 1;
+    color: #e0e0e0;
+}
+
+#dup-progress {
+    margin-bottom: 1;
+}
+
+#dup-auto-title {
+    text-style: bold;
+    margin-top: 1;
+    margin-bottom: 0;
+}
+
+#dup-review-title {
+    text-style: bold;
+    margin-top: 1;
+    margin-bottom: 0;
+}
+
+#dup-auto-table {
+    height: 8;
+    margin-bottom: 1;
+    border: solid #2a2a42;
+}
+
+#dup-review-table {
+    height: 10;
+    margin-bottom: 1;
+    border: solid #2a2a42;
+}
+
+#dup-actions {
+    height: 3;
+    align: center middle;
+    margin-top: 1;
+}
+
+#dup-actions Button {
+    margin: 0 1;
+}

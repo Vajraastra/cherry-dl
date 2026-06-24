@@ -63,11 +63,9 @@ def _site_from_url(url: str) -> str:
 
 
 def _safe_dirname(name: str) -> str:
-    """Sanitiza un nombre para usar como nombre de carpeta."""
-    invalid = r'\/:*?"<>|'
-    for ch in invalid:
-        name = name.replace(ch, "_")
-    return name.strip("._") or "unknown"
+    """Sanitiza un nombre para usar como nombre de carpeta (cross-OS)."""
+    from .util import safe_dirname
+    return safe_dirname(name)
 
 
 # ── API pública ────────────────────────────────────────────────────────────────

@@ -150,7 +150,5 @@ def _collect_media_files(directory: Path) -> list[Path]:
 
 
 def _safe_dirname(name: str) -> str:
-    invalid = r'\/:*?"<>|'
-    for ch in invalid:
-        name = name.replace(ch, "_")
-    return name.strip("._") or "unknown"
+    from .util import safe_dirname
+    return safe_dirname(name)

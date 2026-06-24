@@ -62,7 +62,9 @@ def _finalize_download(
     dest_file.parent.mkdir(parents=True, exist_ok=True)
     tmp_file.write_bytes(data)
     try:
-        tmp_file.rename(dest_file)
+        # replace() (no rename()): en Windows rename lanza FileExistsError si el
+        # destino existe; replace sobrescribe atómicamente en ambos OS.
+        tmp_file.replace(dest_file)
     except OSError:
         tmp_file.unlink(missing_ok=True)
         raise

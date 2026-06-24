@@ -69,6 +69,17 @@ _CREATE_IDX_PROFILE_URLS = (
     "ON profile_urls(profile_id);"
 )
 
+# Pares de perfiles que el usuario marcó explícitamente como "son artistas distintos".
+# id_a < id_b siempre (orden canónico para evitar duplicados).
+_CREATE_EXCLUSIONS = """
+CREATE TABLE IF NOT EXISTS profile_exclusions (
+    id_a INTEGER NOT NULL,
+    id_b INTEGER NOT NULL,
+    PRIMARY KEY (id_a, id_b),
+    CHECK (id_a < id_b)
+);
+"""
+
 
 # ── Inicialización ─────────────────────────────────────────────────────────────
 
@@ -91,6 +102,7 @@ async def init_index(db_path: Path) -> None:
         await db.execute(_CREATE_PROFILES)
         await db.execute(_CREATE_PROFILE_URLS)
         await db.execute(_CREATE_IDX_PROFILE_URLS)
+        await db.execute(_CREATE_EXCLUSIONS)
 
         # Migración: agregar ext_filter si no existe (bases de datos anteriores)
         async with db.execute(
@@ -366,6 +378,154 @@ async def get_profile(db_path: Path, profile_id: int) -> dict | None:
     return profile
 
 
+# ── Auto-descripción de carpetas (respaldo para reindex cross-OS) ──────────────
+
+async def _profile_id_of_url(db_path: Path, url_id: int) -> int | None:
+    async with aiosqlite.connect(db_path) as db:
+        async with db.execute(
+            "SELECT profile_id FROM profile_urls WHERE id = ?", (url_id,)
+        ) as cur:
+            row = await cur.fetchone()
+    return row[0] if row else None
+
+
+async def sync_profile_meta(db_path: Path, profile_id: int) -> None:
+    """Vuelca la metadata del perfil a su catalog.db (carpeta auto-describible).
+
+    Silencioso por diseño: si la carpeta aún no existe (perfil creado sin
+    descargar) o la escritura falla, no interrumpe el flujo principal. index.db
+    es la fuente viva; este meta es el respaldo que permite reconstruir el índice
+    en otro OS vía `cherry-dl reindex`.
+    """
+    from . import catalog
+
+    prof = await get_profile(db_path, profile_id)
+    if not prof:
+        return
+    folder = Path(prof["folder_path"])
+    if not folder.is_dir():
+        return
+
+    meta = {
+        "display_name": prof["display_name"],
+        "primary_site": prof["primary_site"],
+        "created_at":   prof["created_at"],
+        "ext_filter":   prof.get("ext_filter", ""),
+        "urls": [
+            {
+                "url": u["url"], "site": u["site"], "artist_id": u["artist_id"],
+                "enabled": u["enabled"], "last_synced": u["last_synced"],
+                "file_count": u["file_count"],
+            }
+            for u in prof["urls"]
+        ],
+    }
+    try:
+        await catalog.write_profile_meta(folder, meta)
+    except Exception:
+        pass   # el respaldo nunca debe romper el flujo principal
+
+
+async def export_all_meta(db_path: Path) -> int:
+    """Vuelca profile_meta a TODAS las carpetas desde el index.db actual.
+
+    Correr en el OS de origen antes de cambiar de sistema: deja cada carpeta
+    auto-describible para que `reindex_from_folders` reconstruya el índice en el
+    OS destino. Retorna cuántos perfiles se exportaron (carpeta presente).
+    """
+    await init_index(db_path)
+    n = 0
+    for p in await list_profiles(db_path):
+        folder = Path(p["folder_path"])
+        if folder.is_dir():
+            await sync_profile_meta(db_path, p["id"])
+            n += 1
+    return n
+
+
+async def reindex_from_folders(
+    db_path: Path, download_dir: Path, dry_run: bool = False
+) -> dict:
+    """Reconstruye index.db leyendo profile_meta de cada carpeta de download_dir.
+
+    Correr en el OS destino tras montar la partición compartida. Upsert por
+    folder_path (ruta absoluta local del OS actual) → idempotente. NO borra
+    perfiles cuya carpeta no se encuentre (pueden estar en otra partición no
+    montada). Retorna stats: {folders, profiles, urls, no_meta}.
+    """
+    from . import catalog
+
+    download_dir = Path(download_dir)
+    stats = {"folders": 0, "profiles": 0, "urls": 0, "no_meta": 0}
+    await init_index(db_path)
+
+    if not download_dir.is_dir():
+        return stats
+
+    for folder in sorted(download_dir.iterdir()):
+        if not folder.is_dir():
+            continue
+        if not (folder / catalog.CATALOG_NAME).exists():
+            continue
+        stats["folders"] += 1
+
+        meta = await catalog.read_profile_meta(folder)
+        if not meta:
+            stats["no_meta"] += 1
+            continue
+
+        urls = meta.get("urls", [])
+        if dry_run:
+            stats["profiles"] += 1
+            stats["urls"] += len(urls)
+            continue
+
+        async with aiosqlite.connect(db_path) as db:
+            async with db.execute(
+                "SELECT id FROM profiles WHERE folder_path = ?", (str(folder),)
+            ) as cur:
+                row = await cur.fetchone()
+
+            if row:
+                pid = row[0]
+                await db.execute(
+                    "UPDATE profiles SET display_name = ?, primary_site = ?, "
+                    "ext_filter = ? WHERE id = ?",
+                    (meta.get("display_name") or folder.name,
+                     meta.get("primary_site") or "",
+                     meta.get("ext_filter", ""), pid),
+                )
+                await db.execute(
+                    "DELETE FROM profile_urls WHERE profile_id = ?", (pid,)
+                )
+            else:
+                async with db.execute(
+                    "INSERT INTO profiles "
+                    "(display_name, folder_path, primary_site, created_at, ext_filter) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (meta.get("display_name") or folder.name, str(folder),
+                     meta.get("primary_site") or "",
+                     meta.get("created_at"), meta.get("ext_filter", "")),
+                ) as cur:
+                    pid = cur.lastrowid
+
+            for u in urls:
+                await db.execute(
+                    "INSERT INTO profile_urls "
+                    "(profile_id, url, site, artist_id, enabled, last_synced, file_count) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (pid, u.get("url"), u.get("site") or "", u.get("artist_id"),
+                     1 if u.get("enabled", True) else 0,
+                     u.get("last_synced"), u.get("file_count") or 0),
+                )
+                stats["urls"] += 1
+
+            await db.commit()
+        stats["profiles"] += 1
+
+    return stats
+
+
 async def create_profile(
     db_path: Path,
     display_name: str,
@@ -405,6 +565,7 @@ async def add_profile_url(
         ) as cur:
             url_id = cur.lastrowid
         await db.commit()
+    await sync_profile_meta(db_path, profile_id)
     return url_id
 
 
@@ -432,6 +593,10 @@ async def update_profile_url_sync(
         )
         await db.commit()
 
+    pid = await _profile_id_of_url(db_path, url_id)
+    if pid is not None:
+        await sync_profile_meta(db_path, pid)
+
 
 async def update_profile_last_checked(db_path: Path, profile_id: int) -> None:
     """Actualiza last_checked del perfil al momento actual."""
@@ -453,6 +618,8 @@ async def update_profile_ext_filter(
             (ext_filter.strip(), profile_id),
         )
         await db.commit()
+
+    await sync_profile_meta(db_path, profile_id)
 
 
 async def delete_profile(db_path: Path, profile_id: int) -> None:
@@ -483,7 +650,8 @@ async def merge_profiles(
     """
     Fusiona el perfil remove_id en keep_id.
 
-    - Todas las profile_urls de remove_id se reasignan a keep_id.
+    - Las profile_urls de remove_id se reasignan a keep_id, omitiendo
+      duplicadas (misma url, o mismo site+artist_id ya presente en keep).
     - Se elimina el perfil remove_id y su entrada en artists.
     - La carpeta en disco NO se toca — el llamador es responsable de
       mover los archivos únicos antes de llamar a esta función.
@@ -491,14 +659,33 @@ async def merge_profiles(
     Retorna el número de URLs reasignadas.
     """
     async with aiosqlite.connect(db_path) as db:
-        await db.execute("PRAGMA foreign_keys = OFF")   # gestión manual
+        await db.execute("PRAGMA foreign_keys = OFF")
 
-        # Reasignar URLs del perfil a eliminar
+        # Reasignar solo las URLs que no están ya en keep_id
+        # (evitar duplicadas por url exacta o por site+artist_id)
         async with db.execute(
-            "UPDATE profile_urls SET profile_id = ? WHERE profile_id = ?",
-            (keep_id, remove_id),
+            """
+            UPDATE profile_urls
+               SET profile_id = ?
+             WHERE profile_id = ?
+               AND (url IS NULL OR url NOT IN (
+                       SELECT url FROM profile_urls
+                        WHERE profile_id = ? AND url IS NOT NULL))
+               AND NOT EXISTS (
+                       SELECT 1 FROM profile_urls ex
+                        WHERE ex.profile_id  = ?
+                          AND ex.site        = profile_urls.site
+                          AND ex.artist_id   = profile_urls.artist_id
+                          AND ex.artist_id IS NOT NULL)
+            """,
+            (keep_id, remove_id, keep_id, keep_id),
         ) as cur:
             moved = cur.rowcount
+
+        # Eliminar URLs de remove_id que no se pudieron reasignar (duplicadas)
+        await db.execute(
+            "DELETE FROM profile_urls WHERE profile_id = ?", (remove_id,)
+        )
 
         # Eliminar entrada de artists vinculada al perfil que desaparece
         async with db.execute(
@@ -510,7 +697,12 @@ async def merge_profiles(
                 "DELETE FROM artists WHERE folder_path = ?", (row[0],)
             )
 
-        # Eliminar el perfil (sus URLs ya fueron reasignadas)
+        # Eliminar cualquier exclusión que mencionara remove_id
+        await db.execute(
+            "DELETE FROM profile_exclusions WHERE id_a = ? OR id_b = ?",
+            (remove_id, remove_id),
+        )
+
         await db.execute("DELETE FROM profiles WHERE id = ?", (remove_id,))
         await db.commit()
 
@@ -527,6 +719,35 @@ async def set_profile_url_enabled(
             (1 if enabled else 0, url_id),
         )
         await db.commit()
+
+    pid = await _profile_id_of_url(db_path, url_id)
+    if pid is not None:
+        await sync_profile_meta(db_path, pid)
+
+
+async def add_exclusion(db_path: Path, id_a: int, id_b: int) -> None:
+    """
+    Marca el par (id_a, id_b) como "perfiles confirmados distintos".
+    El par ya no aparecerá en futuras búsquedas de duplicados.
+    Orden canónico: siempre almacena min(id_a,id_b) < max(id_a,id_b).
+    """
+    lo, hi = min(id_a, id_b), max(id_a, id_b)
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            "INSERT OR IGNORE INTO profile_exclusions (id_a, id_b) VALUES (?, ?)",
+            (lo, hi),
+        )
+        await db.commit()
+
+
+async def get_exclusions(db_path: Path) -> set[tuple[int, int]]:
+    """Retorna todos los pares excluidos como set de tuplas (id_a, id_b) con id_a < id_b."""
+    async with aiosqlite.connect(db_path) as db:
+        async with db.execute(
+            "SELECT id_a, id_b FROM profile_exclusions"
+        ) as cur:
+            rows = await cur.fetchall()
+    return {(r[0], r[1]) for r in rows}
 
 
 async def list_all(db_path: Path) -> list[dict]:

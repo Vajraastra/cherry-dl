@@ -503,6 +503,83 @@ async def _migrate_structure(dry_run: bool) -> None:
 # ════════════════════════════════════════════════════════════════════════════════
 
 @app.command()
+def export_meta(
+    yes: bool = typer.Option(False, "--yes", "-y", help="No pedir confirmación"),
+):
+    """
+    Vuelca la metadata de cada perfil dentro de su catalog.db (carpeta
+    auto-describible). Correr en el OS de ORIGEN antes de cambiar de sistema:
+    deja la biblioteca lista para reconstruir el índice con `reindex` en el
+    otro OS. Seguro de correr múltiples veces.
+    """
+    run(_export_meta(yes))
+
+
+async def _export_meta(yes: bool) -> None:
+    from .config import load_config, ensure_dirs, INDEX_DB
+    from .index import export_all_meta
+
+    config = load_config()
+    ensure_dirs(config)
+    if not yes:
+        console.print(
+            "[bold]Se escribirá profile_meta en el catalog.db de cada perfil.[/]"
+        )
+        if not typer.confirm("¿Continuar?"):
+            console.print("[yellow]Cancelado.[/]")
+            return
+
+    n = await export_all_meta(INDEX_DB)
+    console.print(f"[green]✓ Metadata exportada a {n} carpeta(s).[/]")
+
+
+@app.command()
+def reindex(
+    download_dir: Optional[str] = typer.Argument(
+        None, help="Carpeta de colecciones (por defecto: download_dir del config)"
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Muestra qué reconstruiría sin tocar el índice"
+    ),
+):
+    """
+    Reconstruye index.db leyendo la metadata de cada carpeta de la biblioteca.
+    Correr en el OS DESTINO tras montar la partición compartida y apuntar
+    download_dir a ella. Idempotente: upsert por ruta local, no borra perfiles
+    cuya carpeta no esté montada.
+    """
+    run(_reindex(download_dir, dry_run))
+
+
+async def _reindex(download_dir: Optional[str], dry_run: bool) -> None:
+    from .config import load_config, ensure_dirs, INDEX_DB
+    from .index import reindex_from_folders
+
+    config = load_config()
+    ensure_dirs(config)
+    base = Path(download_dir) if download_dir else config.download_path
+
+    if not base.is_dir():
+        console.print(f"[red]No existe la carpeta: {base}[/]")
+        raise typer.Exit(1)
+
+    console.print(f"Reindexando desde: [bold]{base}[/]"
+                  + ("  [dim](dry-run)[/]" if dry_run else ""))
+    stats = await reindex_from_folders(INDEX_DB, base, dry_run=dry_run)
+
+    console.print(
+        f"[green]✓[/] carpetas: {stats['folders']}  ·  "
+        f"perfiles: {stats['profiles']}  ·  URLs: {stats['urls']}  ·  "
+        f"sin metadata: {stats['no_meta']}"
+    )
+    if stats["no_meta"]:
+        console.print(
+            "[yellow]Aviso:[/] hay carpetas sin profile_meta. Corré "
+            "[bold]export-meta[/] en el OS de origen para incluirlas."
+        )
+
+
+@app.command()
 def migrate_pending(
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Muestra qué catálogos se migrarían sin tocarlos"
@@ -719,10 +796,8 @@ async def _compact(
 # ════════════════════════════════════════════════════════════════════════════════
 
 def _safe_dirname(name: str) -> str:
-    invalid = r'\/:*?"<>|'
-    for ch in invalid:
-        name = name.replace(ch, "_")
-    return name.strip("._") or "unknown"
+    from .util import safe_dirname
+    return safe_dirname(name)
 
 
 def _fmt_size(n: int) -> str:

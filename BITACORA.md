@@ -6,6 +6,86 @@
 
 ---
 
+## 2026-06-23 — Compatibilidad Windows 11 + biblioteca portable entre OSes
+
+Migración de Bazzite (Fedora Atomic) a Windows 11. Auditoría de compatibilidad y
+capa de portabilidad para usar **una sola biblioteca compartida** (partición común
+montada con prefijos distintos por OS: `E:\…` vs `/run/media/…`).
+
+### Decisión de arquitectura
+`index.db` (en `~/.cherry-dl/`, con rutas **absolutas**) pasa a ser un **caché
+derivado y reconstruible**. La fuente de verdad es la biblioteca de carpetas:
+cada `catalog.db` lleva una tabla `profile_meta` (JSON) que hace la carpeta
+**auto-describible** (display_name, primary_site, urls con last_synced/file_count,
+ext_filter). Así el índice se reconstruye en cualquier OS con rutas locales sin
+perder las URLs de scrape ni el estado de sync. Se descartó reubicar `index.db` a
+la partición compartida (≈102 referencias a `INDEX_DB` → refactor caro y frágil, y
+escritura concurrente entre OSes).
+
+### Fase 1 — Windows-now (mecánico)
+- **`run.sh` portable**: detecta OS por `uname` (MINGW/MSYS/CYGWIN → `uv.exe`,
+  `Scripts/`). Filosofía de **cero dependencia del sistema**: `UV_PYTHON_INSTALL_DIR=.tools/python`
+  instala un Python standalone **dentro del proyecto**; uv + venv también locales.
+  En Windows uv se baja como binario (`curl` + `unzip` del zip oficial), no con
+  `install.ps1` (Windows PowerShell 5.1 falla al invocarse desde Git Bash: error
+  de carga de módulos en `Get-ExecutionPolicy`).
+- **`run.bat`**: wrapper que delega a `run.sh` vía el Git Bash de Git for Windows.
+- **Higiene de repo**: `.tools/` y `.venv` fuera de git (`git rm --cached .tools`,
+  ya estaban los ELF Linux trackeados); `.gitattributes` con `*.sh eol=lf` y
+  `*.bat eol=crlf` (CRLF rompería los scripts bajo Git Bash).
+- **`rename()` → `replace()`**: en Windows `Path.rename` lanza `FileExistsError`
+  si el destino existe; `replace()` sobrescribe atómicamente en ambos OS. Aplicado
+  en `engine.py` (tmp→dest), `catalog.py` (compactación `.tmp`→new) y los 5 sitios
+  de descarga de `tui/app.py`. (La renombrada de carpeta huérfana `orphan_*` se
+  deja como `rename` a propósito: no debe clobberar una existente.)
+- **Portapapeles Windows**: `_read_clipboard()` usa `powershell Get-Clipboard -Raw`
+  en `sys.platform == 'win32'`, antes de los backends Linux (wl-paste/xclip/xsel).
+
+### Fase 2 — Capa de portabilidad
+- **`catalog.py`**: tabla `profile_meta` (fila única id=1, blob JSON) idempotente
+  en `init_catalog`; `write_profile_meta` / `read_profile_meta`.
+- **`index.py`**: `sync_profile_meta(db_path, profile_id)` vuelca el perfil a su
+  `catalog.db` (silencioso si la carpeta no existe). Se llama desde las mutaciones
+  (`add_profile_url`, `update_profile_url_sync`, `update_profile_ext_filter`,
+  `set_profile_url_enabled`) y desde el borrado de URL en la TUI → toda
+  modificación mantiene la carpeta al día sin tocar los ~20 call-sites que leen
+  `folder_path`.
+- **`index.py`**: `export_all_meta` (volcar todo, correr en OS origen) y
+  `reindex_from_folders` (reconstruir index.db desde carpetas, upsert por
+  folder_path local, idempotente, **no destructivo** con carpetas no montadas).
+- **`cli.py`**: comandos `export-meta` y `reindex [dir] [--dry-run]`.
+- **`tui/app.py`**: botón "⟲ Reindexar" + **auto-reindex** al arrancar si el índice
+  está vacío pero la carpeta tiene catálogos (escenario "recién cambié de OS").
+- **Flujo de migración**: en Bazzite `cherry-dl export-meta` → bootear Windows →
+  apuntar `download_dir` a la partición → `reindex` (o auto al abrir la TUI).
+
+### Fase 3 — Endurecimiento de nombres
+- `cherry_dl/util.py`: `safe_dirname()` único (caracteres ilegales, control,
+  puntos/espacios finales, nombres reservados de Windows `CON/NUL/COM1…`). Los 4
+  `_safe_dirname` duplicados delegan en él; `_auto_folder` de la TUI ahora sanitiza
+  (antes no).
+
+### Caveats inevitables de NTFS (no son bugs de código)
+- **Case-insensitive**: ext4 (Linux) distingue mayúsculas/minúsculas, NTFS no. Dos
+  archivos que solo difieren en caso colisionan al copiar a Windows. cherry-dl
+  numera los archivos (`Artista_00001`) → riesgo bajo, pero existe en nombres de
+  carpeta de artista.
+- **Límite de ruta 260 chars**: recomendable habilitar *long paths* en Win11
+  (`HKLM\SYSTEM\CurrentControlSet\Control\FileSystem\LongPathsEnabled = 1`).
+- `index.db` se mantiene en el home (NO en la partición compartida) para evitar
+  corrupción por permisos/montaje NTFS y escritura concurrente entre OSes.
+
+### Verificación
+- `run.sh --help` en Win11: bootstrap completo (uv vía curl, Python 3.12.13
+  standalone en `.tools/python`, venv sync, CLI corre). ✓
+- Test funcional roundtrip (`scratchpad`): write/read meta, reindex en índice vacío
+  con rutas locales, `last_synced` preservado, idempotencia. ✓
+- `safe_dirname` (8 casos) ✓ · suite `tests/` 18/18 ✓.
+- **Pendiente**: prueba cross-OS real cuando la partición esté montada en ambos
+  sistemas. PySide6 sigue fuera de alcance (fase futura; la compat vive en backend).
+
+---
+
 ## Arquitectura general
 
 cherry-dl es un **mass downloader modular** para Linux/Windows escrito en Python 3.10+.
@@ -142,6 +222,145 @@ dearpygui>=1.11.0      # GUI DESCARTADA — reemplazar con PySide6 + qasync
 ```
 
 **Cambio Fase 2:** quitar `dearpygui`, agregar `PySide6>=6.7.0` y `qasync>=0.23.0`.
+
+---
+
+## Sistema de detección y fusión de duplicados — 2026-04-09
+
+### Diseño acordado
+
+**Pipeline de 3 niveles con costo ascendente:**
+
+| Nivel | Criterio | Costo | Certeza | Threshold |
+|-------|----------|-------|---------|-----------|
+| 1 | URL match (mismo `site` + `artist_id`) | DB query O(n²) | Definitivo | cualquier coincidencia |
+| 2 | Similitud de nombre (difflib) | CPU O(n²) | Probable/Posible | ≥0.80 / 0.60–0.79 |
+| 3 | Hash join SQL (ATTACH + INNER JOIN) | I/O SQLite | Definitivo/Probable | ≥51% auto / 10–50% revisión |
+
+**Reglas de fusión:**
+- El perfil más antiguo (`created_at`, fallback a `id` menor) absorbe al más nuevo.
+- Archivos únicos de B se mueven físicamente a la carpeta de A con nuevo contador.
+- URLs de B se agregan a A solo si no son duplicadas (mismo `url` o mismo `site+artist_id`).
+- Archivos ya existentes en A quedan como "huérfanos" en carpeta B: usuario elige borrar / renombrar carpeta como `orphan_*` / ignorar.
+- Se ofrece compactar la numeración del perfil destino tras la migración.
+- Pares marcados como "distintos" se guardan en `profile_exclusions` y se omiten en futuros scans.
+
+**Comparación de hashes — implementación SQL:**
+```sql
+ATTACH DATABASE '/ruta/catalog_b.db' AS cat_b;
+SELECT COUNT(*) FROM files a INNER JOIN cat_b.files b ON a.hash = b.hash;
+```
+No escanea archivos en disco — solo consulta hashes ya indexados en SQLite. Eficiente porque `hash` es `PRIMARY KEY` (B-tree index) en ambas tablas.
+
+### Archivos modificados
+
+**`cherry_dl/catalog.py`**
+- `import asyncio, shutil, Callable` agregados
+- `compare_by_hash_join(folder_a, folder_b) → dict` — ATTACH + INNER JOIN; retorna `{total_a, total_b, matches, coverage}`
+- `migrate_unique_files(folder_src, folder_dst, on_progress) → dict` — mueve archivos únicos con nuevo counter, retorna `{moved, orphaned, purged, errors, orphaned_paths}`
+
+**`cherry_dl/index.py`**
+- `_CREATE_EXCLUSIONS` — nueva tabla `profile_exclusions(id_a, id_b PK, CHECK id_a < id_b)`
+- Tabla creada en `init_index()` (idempotente)
+- `add_exclusion(db_path, id_a, id_b)` — guarda par como "distintos"
+- `get_exclusions(db_path) → set[tuple]` — retorna todos los pares excluidos
+- `merge_profiles()` actualizado — deduplica URLs al fusionar, limpia exclusiones del perfil eliminado
+
+**`cherry_dl/tui/app.py`**
+- Imports actualizados: `compare_by_hash_join`, `migrate_unique_files`, `add_exclusion`, `get_exclusions`
+- `_url_overlap(urls_a, urls_b) → str` — helper que detecta mismo `site+artist_id` en dos listas de URLs
+- `action_compare_profiles()` simplificado — ahora solo hace `push_screen(DuplicateScreen())`
+- `_do_compare`, `_do_merge`, `_execute_merge` eliminados (reemplazados por DuplicateScreen)
+- `SelectProfileModal`, `CompareResultModal`, `MergeConfirmModal` eliminados
+- **`DuplicateScreen`** — pantalla completa con:
+  - `_scan_phase1()`: worker que compara todos los pares N×N por URL + nombre, llena tablas en tiempo real
+  - `_scan_phase2()`: worker de hash join bajo demanda, actualiza tablas conforme llega cada resultado
+  - Tabla "FUSIÓN AUTOMÁTICA" (URL match o ≥51% hashes)
+  - Tabla "REVISIÓN MANUAL" (nombre similar / hash 10–50%) con checkboxes toggle
+  - `_execute_merges()`: migra archivos, fusiona índice, gestiona huérfanos, ofrece compactar
+- `HashScanWarningModal` — advertencia antes de fase 2
+- `OrphanActionModal` — borrar / renombrar carpeta como orphan_ / ignorar
+- `CompactAfterMergeModal` — ofrece compactar perfiles que recibieron archivos
+- `_dup_keep_remove()` — determina cuál perfil es "más antiguo" (keep vs remove)
+- `_handle_orphans()` — función sync ejecutada en thread (borra o renombra)
+- `_compact_folders()` — compacta numeración tras fusión
+
+**`cherry_dl/tui/theme.tcss`**
+- Estilos para `DuplicateScreen`: `#dup-main`, `#dup-status`, `#dup-progress`, `#dup-auto-table`, `#dup-review-table`, `#dup-actions`
+
+### Estado al cerrar la sesión
+
+El código compila y los imports verifican correctamente:
+```
+catalog OK (compare_by_hash_join, migrate_unique_files)
+index OK (add_exclusion, get_exclusions, merge_profiles)
+tui OK (DuplicateScreen, todos los símbolos nuevos)
+```
+**No se ejecutó prueba end-to-end.** La sesión terminó antes de poder probar en producción.
+
+### Pendiente para próxima sesión
+1. **Prueba de DuplicateScreen** — abrir TUI, ir a Perfiles → ⊗ Comparar, verificar que fase 1 se ejecuta y puebla las tablas.
+2. **Prueba de fusión** — crear dos perfiles de prueba, ejecutar fusión automática, verificar migración de archivos + catalog + index.
+3. **Prueba de fase 2** — con dos perfiles con archivos en común, verificar que el hash join retorna coverage correcto.
+4. **Auto-check en creación de perfil** — actualmente la detección de duplicados solo corre cuando el usuario abre DuplicateScreen manualmente. Falta añadir un check automático (fase 1 solamente) al finalizar `_create_profile` en `NewProfileModal`.
+
+---
+
+## Filtro por tipo + pending_queue — 2026-04-09
+
+### Problema raíz
+
+Al descargar imágenes y luego cambiar el filtro a ZIPs, el sistema ignoraba los ZIPs porque:
+
+1. El fingerprint de filtro se guardaba **incluso cuando la API devolvía 0 archivos** (bloqueo transitorio de DDoS-Guard u otro error de red). En el siguiente intento, el sistema veía `changed=False` y saltaba el scan.
+2. La condición de reanudación solo chequeaba `existing_pending > 0`, sin verificar que algún pendiente realmente coincidiera con el filtro actual. Un ítem `20.png` atascado en la cola hacía que nunca se escaneara para ZIPs.
+3. Al cambiar el filtro, `_scan_since` seguía siendo `url_since` (fecha del último sync), bloqueando la visibilidad de posts anteriores donde estaban los ZIPs.
+
+### Solución implementada
+
+**`tui/app.py: ArtistScreen._do_download()`**
+
+| Cambio | Descripción |
+|--------|-------------|
+| `_matching_pending` | Cuenta pendientes que coinciden con el filtro actual (usa `ext_filter` en SQL). |
+| Condición de reanudación | `existing_pending > 0 and not _filter_changed and _matching_pending > 0` — si los pendientes no coinciden, se fuerza un nuevo scan. |
+| `_scan_since = None` | Cuando el filtro cambia, se ignora `url_since` y se hace scan completo para que posts viejos sean visibles. |
+| Fingerprint condicional | `set_meta_int(folder, _filter_key, _filter_sig)` solo se llama cuando `_scan_files_seen > 0`. Si la API devuelve 0 (error transitorio), el fingerprint no se guarda y el próximo intento repite el scan. |
+
+**`catalog.py: pending_count(ext_filter=...)`**
+
+Agregado parámetro opcional `ext_filter: set[str] | None`. Cuando se pasa, añade cláusulas `LOWER(filename_hint) LIKE '%{ext}'` al WHERE para contar solo ítems del tipo deseado.
+
+**`catalog.py: clean_pending_catalog_overlap()`**
+
+Nueva función: elimina entradas de `pending_queue` cuyo `url_source` ya aparece en la tabla `files` (archivos descargados que no se limpiaron de la cola en sesiones previas).
+
+### Otros cambios de la sesión
+
+- **ArtistScreen**: reemplazado `Input` de texto para filtro con checkboxes idénticos a `BatchScreen` (usa `EXT_GROUPS`). El filtro se persiste en JSON en la DB del perfil.
+- **`_encode_profile_filter` / `_decode_profile_filter`**: serialización JSON de filtros con compatibilidad hacia atrás con el formato de texto legado.
+- **`ProfileFilterModal`**: modal de configuración de filtro por perfil, invocado desde `BatchScreen` cuando se activa "usar configuración por perfil".
+- **`BatchScreen`**: checkbox "usar config por perfil" — al activarlo, se configura el filtro de cada perfil antes de iniciar el batch.
+- **Pending count en lista de perfiles**: la columna `⏳ N` ahora cuenta solo archivos que coinciden con el filtro activo del perfil.
+- **Mensajes DBG eliminados**: limpieza de logs de depuración temporales.
+
+---
+
+## Auditoría y correcciones — 2026-04-07
+
+### Bugs corregidos
+
+| ID | Archivo | Descripción | Fix |
+|----|---------|-------------|-----|
+| BUG-1 | `tui/app.py:796` | `compare_catalogs` llamado sin `await` → retornaba coroutine, datos siempre 0 | `await compare_catalogs(...)` |
+| BUG-2 | `tui/app.py:1211` | `unique_to_b` es `list[str]` pero se trataba como `int` → modal imprimía la lista cruda | `len(s.get("unique_to_b", []))` |
+| BUG-3 | `tui/app.py` deferred loop + `BatchScreen._download_url` | `next_counter` se asignaba antes de intentar la descarga → fallo generaba hueco en numeración | Mover `next_counter` + rename al bloque de éxito; descargar a nombre temporal `_dl_{hash}{ext}` |
+| BUG-4 | `tui/app.py:_do_verify` | `NeedsManualAuth`/`NeedsPixivAuth` no capturadas → error genérico sin ofrecer modal de auth | Agregar handlers con `PatreonAuthModal` / `PixivAuthModal` (mismo patrón que `_do_download`) |
+| BUG-5 | `tui/app.py:ArtistScreen.action_go_back` | `pop_screen()` inmediato con workers activos → callbacks intentaban actualizar widgets desmontados | Flag `_pending_exit`; `_set_busy(False)` detecta el flag y hace el pop |
+| BUG-6 | `tui/app.py:_resolve_url` | `_name_similarity(_normalize_name(a), _normalize_name(b))` — normalización doble (idempotente pero redundante) | `_name_similarity(a, b)` — la función ya normaliza internamente |
+| DEUDA-2 | `engine.py:407,422` | `asyncio.get_event_loop()` deprecado en Python 3.10+ dentro de contexto async | `asyncio.get_running_loop()` |
+
+Todos los fixes verificados con suite de regresión: 11/11 ✓
 
 ---
 
@@ -612,6 +831,45 @@ al nuevo scope. Se migra a **PySide6 + qasync**.
   - *Repartidor* (producer): solo garantiza URLs únicas con `seen_urls: set[str]`. Sin consultas al catálogo.
   - *Workers*: reciben una URL única cada uno, verifican catálogo por su cuenta, descargan y catalogan.
   - `in_progress_hashes: set[str]` compartido entre workers: se verifica y se agrega sin await intermedio (operación atómica en asyncio), previniendo que dos workers procesen el mismo hash concurrentemente.
+
+---
+
+## 2026-04-07 — Sistema de filtro por tipo de archivo en BatchScreen
+
+### Problema
+El campo de texto libre para filtrar extensiones en el modo Batch no funcionaba: aunque el usuario escribiera `jpg,png,webp`, la descarga continuaba bajando gif, mp4 y otros tipos no solicitados.
+
+### Implementación: `EXT_GROUPS` + Checkboxes
+
+Se reemplazó el `Input` de texto por un panel de `Checkbox` con 7 grupos predefinidos:
+
+| ID | Etiqueta | Extensiones |
+|----|----------|-------------|
+| `images` | Imágenes | jpg, jpeg, png, webp, bmp, tiff, tif, avif, jxl |
+| `anim` | Animaciones | gif, apng |
+| `video` | Video | mp4, webm, mkv, avi, mov, wmv, flv, m4v, mpg, mpeg |
+| `audio` | Audio | mp3, flac, ogg, wav, aac, m4a, opus, wma |
+| `zip` | Comprimidos | zip, rar, 7z, tar, gz, bz2, xz, cbz, cbr |
+| `docs` | Documentos | pdf, doc, docx, txt, epub |
+| `project` | Archivos proyecto | psd, clip, xcf, kra, procreate, sai, sai2, ai, ora, mdp |
+
+Más campo `Input` para extensiones custom. Sin ningún grupo marcado → descarga todo (sin filtro).
+
+### Bug 1 — Filtro no aplicado en tiempo de descarga
+**Síntoma:** aunque los checkboxes filtraban correctamente durante el scan (`_scan_url`), los archivos ya presentes en `pending_queue` de sesiones anteriores (sin filtro) se descargaban sin validación.
+**Causa:** `_download_url` no recibía ni aplicaba `ext_filter`. El filtro solo existía en `_scan_url`.
+**Solución:** `_download_url` recibe `ext_filter` y `exclude_mode`. Al inicio de `_one()` (worker por archivo), si el `filename_hint` no pasa el filtro → `remove_pending` + skip. El log muestra `⊘ archivo [excluido por filtro]`.
+
+### Bug 2 — Extensiones sin punto nunca coincidían
+**Síntoma:** después del fix anterior, con "Imágenes" marcado se rechazaban también los `.jpg`.
+**Causa:** `EXT_GROUPS` almacena extensiones sin punto (`"jpg"`). `_build_include` en `_start_batch` hacía `include_exts.update(exts)` — sin agregar el punto. `_passes_ext_filter` compara contra `Path(filename).suffix` que devuelve `".jpg"` (con punto). `".jpg" in {"jpg"}` → `False` → todo rechazado.
+**Solución:** `include_exts.update("." + ext for ext in exts)` — una línea.
+**Por qué los tests no lo detectaron inicialmente:** el helper `_build_include` del test agregaba el punto manualmente, desacoplándose de la implementación real. Se agregó `test_ext_groups_dot_normalization` para fijar este contrato explícitamente.
+
+### Archivos modificados
+- `cherry_dl/tui/app.py` — `Checkbox` en imports, `EXT_GROUPS`, `BatchScreen.compose()`, `_start_batch()`, `_download_url()`
+- `cherry_dl/tui/theme.tcss` — estilos `#batch-cfg-top`, `#batch-filter-groups`, `#batch-filter-custom`
+- `tests/test_ext_groups.py` — 18 tests (nuevo archivo)
 
 ---
 
@@ -1245,3 +1503,66 @@ ninguna descarga. Útil para ver de un vistazo qué perfiles tienen trabajos pen
   primera celda ya no era un string limpio tras el primer render.
 - Fix: `_do_check_all` ahora llama directamente `await self._load_profiles()` que
   reconstruye la tabla completa con estados correctos. Más simple y sin el problema de parsing.
+
+---
+
+## Batch Download (2026-04-06)
+
+### Problema
+Kemono.cr (y potencialmente otros sitios) cortan la conexión tras cierto tiempo, matando el
+proceso de descarga. Perfiles con 3000+ imágenes pueden tardar días si el usuario tiene que
+reiniciar manualmente cada vez.
+
+### Solución: `BatchScreen`
+Nueva pantalla (`tui/app.py:BatchScreen`) que descarga todos los perfiles en secuencia con
+reintentos automáticos. El truco clave es que **`pending_queue` ya existe**: si la conexión
+se corta a mitad de un perfil, los archivos no descargados siguen en la cola y se retoman
+exactamente ahí en la siguiente iteración.
+
+### Flujo del loop
+1. `to_process = todos los perfiles con URLs habilitadas`
+2. Por cada perfil:
+   - `pending_count()` → si 0, escanear API → si sigue en 0, marcar completo
+   - `_download_url()` — descarga secuencial archivo por archivo
+   - Si `consecutive_errors >= MAX_CONSECUTIVE (5)`: abandonar perfil, agregar a `still_incomplete`
+3. `to_process = still_incomplete` → nueva iteración
+4. Para cuando `to_process` quede vacío o el usuario presione ⏹ Detener
+
+### Diferencias con `ArtistScreen._do_download`
+| | ArtistScreen | BatchScreen |
+|---|---|---|
+| Workers | N (paralelo) | 1 (secuencial) |
+| UI | Filas por worker | Log + ProgressBar |
+| Timeout error | Diferido (cola secundaria) | `consecutive_errors` → abandona perfil |
+| Scope | Un perfil a la vez | Todos los perfiles en loop |
+
+La descarga secuencial es intencional: batch prioriza resiliencia sobre velocidad.
+
+### Archivos modificados
+- `cherry_dl/tui/app.py` — `BatchScreen` (escaneo, descarga, loop principal), botón "⚡ Batch"
+- `cherry_dl/tui/theme.tcss` — estilos para `BatchScreen`
+
+---
+
+## Bug: `list_profiles` sin URLs (2026-04-06)
+
+**Síntoma:** `BatchScreen` y `_do_scan_all` mostraban "No hay perfiles con URLs habilitadas"
+aunque los perfiles existían y tenían URLs configuradas.
+
+**Causa:** `list_profiles()` en `index.py` solo devuelve metadatos básicos del perfil
+(`id`, `display_name`, `folder_path`, `url_count`) — NO incluye el array `urls`.
+Ambas funciones hacían `profile.get("urls", [])` que siempre devolvía `[]`.
+
+**Fix:** reemplazar `list_profiles` por un loop que llama `get_profile(id)` para cada perfil.
+`get_profile` sí devuelve el campo `urls` completo con todas las URLs y su estado.
+
+```python
+_slim = await list_profiles(INDEX_DB)
+profiles = []
+for _p in _slim:
+    _full = await get_profile(INDEX_DB, _p["id"])
+    if _full:
+        profiles.append(_full)
+```
+
+Afectaba: `ProfilesScreen._do_scan_all` y `BatchScreen._do_batch`.

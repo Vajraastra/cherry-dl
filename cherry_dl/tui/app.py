@@ -36,21 +36,27 @@ from textual.widgets import (
 )
 
 from ..catalog import (
-    add_file, add_pending, compare_catalogs, get_all_files,
-    get_meta_int, get_pending_files, get_stats,
-    hash_exists, init_catalog, next_counter,
+    add_file, add_pending, clean_pending_catalog_overlap,
+    compare_catalogs, compare_by_hash_join,
+    get_all_files, get_meta_int, get_pending_files, get_stats,
+    hash_exists, init_catalog, migrate_unique_files, next_counter,
     pending_count, pending_url_exists, remove_pending, set_meta_int, url_exists,
 )
 from ..config import INDEX_DB, load_config, save_config
+from ..util import safe_dirname
 from ..index import (
+    add_exclusion,
     add_profile_url,
     create_profile,
     delete_profile,
+    get_exclusions,
     get_profile,
     init_index,
     list_profiles,
     merge_profiles,
+    reindex_from_folders,
     set_profile_url_enabled,
+    sync_profile_meta,
     update_profile_ext_filter,
     update_profile_last_checked,
 )
@@ -69,21 +75,74 @@ EXT_GROUPS: dict[str, tuple[str, set[str]]] = {
 }
 
 
+def _encode_profile_filter(group_ids: list[str], custom: str) -> str:
+    """Serializa selección de filtro de perfil a JSON para guardar en BD."""
+    import json
+    return json.dumps({"groups": group_ids, "custom": custom.strip()})
+
+
+def _decode_profile_filter(stored: str) -> tuple[set[str], set[str]]:
+    """
+    Deserializa un ext_filter guardado.
+    Retorna (group_ids_set, ext_filter_set).
+    - Si stored empieza con '{' → formato JSON nuevo.
+    - Si no → formato legacy (extensiones separadas por coma).
+    """
+    import json
+    from ..gui.bridge import _parse_ext_filter
+
+    if not stored:
+        return set(), set()
+
+    if stored.startswith("{"):
+        try:
+            data      = json.loads(stored)
+            group_ids = set(data.get("groups", []))
+            ext_set: set[str] = set()
+            for gid in group_ids:
+                if gid in EXT_GROUPS:
+                    _, exts = EXT_GROUPS[gid]
+                    ext_set.update("." + e for e in exts)
+            ext_set.update(_parse_ext_filter(data.get("custom", "")))
+            return group_ids, ext_set
+        except Exception:
+            pass
+
+    # Legacy: extensiones separadas por coma
+    return set(), _parse_ext_filter(stored)
+
+
 # ── Portapapeles del sistema ────────────────────────────────────────────────
 
 def _read_clipboard() -> str:
-    """Lee texto del portapapeles (Wayland / X11). Devuelve '' si falla."""
+    """Lee texto del portapapeles. Devuelve '' si falla.
+
+    Backends por OS:
+      - Windows: PowerShell Get-Clipboard
+      - Wayland: wl-paste
+      - X11:     xclip / xsel
+    """
     import subprocess
-    for cmd in (
-        ["wl-paste", "--no-newline"],
-        ["wl-paste"],
-        ["xclip", "-selection", "clipboard", "-o"],
-        ["xsel", "--clipboard", "--output"],
-    ):
+    import sys
+
+    if sys.platform == "win32":
+        candidates = (
+            ["powershell", "-NoProfile", "-Command", "Get-Clipboard -Raw"],
+        )
+    else:
+        candidates = (
+            ["wl-paste", "--no-newline"],
+            ["wl-paste"],
+            ["xclip", "-selection", "clipboard", "-o"],
+            ["xsel", "--clipboard", "--output"],
+        )
+
+    for cmd in candidates:
         try:
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=2)
             if r.returncode == 0:
-                return r.stdout.rstrip("\n")
+                # PowerShell agrega CRLF final; rstrip cubre \n y \r.
+                return r.stdout.rstrip("\r\n")
         except (FileNotFoundError, subprocess.TimeoutExpired):
             continue
     return ""
@@ -132,6 +191,23 @@ def _name_similarity(a: str, b: str) -> float:
     if not na or not nb:
         return 0.0
     return SequenceMatcher(None, na, nb).ratio()
+
+
+def _url_overlap(urls_a: list[dict], urls_b: list[dict]) -> str:
+    """
+    Detecta si dos listas de profile_urls comparten el mismo artista
+    en el mismo sitio (site + artist_id coinciden).
+
+    Retorna una descripción del primer match encontrado, o "" si no hay.
+    """
+    for ua in urls_a:
+        if not ua.get("artist_id") or not ua.get("site"):
+            continue
+        for ub in urls_b:
+            if (ub.get("site") == ua["site"]
+                    and ub.get("artist_id") == ua["artist_id"]):
+                return f"{ua['site']}/{ua['artist_id']}"
+    return ""
 
 
 # ── Helpers de formato ──────────────────────────────────────────────────────
@@ -423,7 +499,7 @@ class NewProfileModal(ModalScreen[dict | None]):
             return
         cfg    = load_config()
         name   = self.query_one("#inp-name", Input).value.strip() or self._artist_info.name
-        folder = cfg.download_path / name
+        folder = cfg.download_path / safe_dirname(name)
         self.query_one("#inp-folder", Input).value = str(folder)
 
     def _submit(self, download: bool) -> None:
@@ -650,6 +726,7 @@ class ProfilesScreen(Screen):
             yield Button("↑ Actualizar Todo", id="btn-scan-all")
             yield Button("⚡ Batch",          id="btn-batch")
             yield Button("⟳ Chequear Todo",  id="btn-check-all")
+            yield Button("⟲ Reindexar",      id="btn-reindex")
             yield Button("⚙ Config",         id="btn-settings")
         yield Label("  PERFILES", classes="section-label")
         yield DataTable(id="profiles-table", cursor_type="row")
@@ -664,6 +741,7 @@ class ProfilesScreen(Screen):
             case "btn-scan-all":  self.action_scan_all()
             case "btn-batch":     self.action_batch_download()
             case "btn-check-all": self.action_check_all()
+            case "btn-reindex":   self.action_reindex()
             case "btn-settings":  self.action_settings()
 
     def on_mount(self) -> None:
@@ -675,7 +753,32 @@ class ProfilesScreen(Screen):
         tbl.add_column("Estado",      width=12)
         tbl.add_column("Última sync", width=14)
         tbl.add_column("Carpeta",     width=36)
-        self.run_worker(self._load_profiles(), exclusive=True)
+        self.run_worker(self._startup_load(), exclusive=True)
+
+    async def _startup_load(self) -> None:
+        """Carga inicial con auto-reindex si el índice está vacío.
+
+        Escenario "recién cambié de OS": index.db por-máquina aún no existe pero
+        la partición compartida ya tiene carpetas auto-describibles → se
+        reconstruye el índice automáticamente (idempotente, no destructivo).
+        """
+        try:
+            profiles = await list_profiles(INDEX_DB)
+            if not profiles:
+                base = load_config().download_path
+                if base.is_dir() and any(
+                    (d / "catalog.db").exists()
+                    for d in base.iterdir() if d.is_dir()
+                ):
+                    self.app.notify("Índice vacío — reconstruyendo desde las carpetas…")
+                    stats = await reindex_from_folders(INDEX_DB, base)
+                    if stats["profiles"]:
+                        self.app.notify(
+                            f"Reindex: {stats['profiles']} perfiles restaurados"
+                        )
+        except Exception:
+            pass
+        await self._load_profiles()
 
     async def _load_profiles(self) -> None:
         tbl = self.query_one("#profiles-table", DataTable)
@@ -688,10 +791,14 @@ class ProfilesScreen(Screen):
                 last   = (p.get("last_checked") or "Nunca")[:10]
 
                 # Indicador de estado basado en pending_queue
+                # Si el perfil tiene filtro configurado, el conteo refleja
+                # solo los archivos pendientes que coinciden con ese filtro.
                 if not folder.exists():
                     estado = "[dim]?[/]"
                 else:
-                    n_pending = await pending_count(folder)
+                    _stored_ext = p.get("ext_filter", "")
+                    _, _eff_ext = _decode_profile_filter(_stored_ext)
+                    n_pending = await pending_count(folder, ext_filter=_eff_ext or None)
                     if n_pending > 0:
                         estado = f"[yellow]⏳ {n_pending}[/]"
                     elif p.get("last_checked"):
@@ -716,6 +823,26 @@ class ProfilesScreen(Screen):
 
     def action_refresh(self) -> None:
         self.run_worker(self._load_profiles(), exclusive=True)
+
+    def action_reindex(self) -> None:
+        self.run_worker(self._do_reindex(), exclusive=True)
+
+    async def _do_reindex(self) -> None:
+        """Reconstruye index.db desde las carpetas de la biblioteca."""
+        base = load_config().download_path
+        if not base.is_dir():
+            self.app.notify(f"No existe download_dir: {base}", severity="error")
+            return
+        self.app.notify("Reindexando desde las carpetas…")
+        try:
+            stats = await reindex_from_folders(INDEX_DB, base)
+        except Exception as exc:
+            self.app.notify(f"Error al reindexar: {exc}", severity="error")
+            return
+        msg = (f"Reindex: {stats['profiles']} perfiles, "
+               f"{stats['urls']} URLs, {stats['no_meta']} sin metadata")
+        self.app.notify(msg)
+        await self._load_profiles()
 
     def action_new_profile(self) -> None:
         self.app.push_screen(NewProfileModal(), self._on_new_profile)
@@ -781,62 +908,11 @@ class ProfilesScreen(Screen):
         except Exception as exc:
             self.app.notify(f"Error al eliminar: {exc}", severity="error")
 
-    # ── Comparar perfiles ──────────────────────────────────────────────────────
+    # ── Buscar duplicados ──────────────────────────────────────────────────────
 
     def action_compare_profiles(self) -> None:
-        tbl = self.query_one("#profiles-table", DataTable)
-        if tbl.cursor_row is None:
-            self.app.notify("Selecciona un perfil primero", severity="warning")
-            return
-        row = tbl.get_row_at(tbl.cursor_row)
-        profile_a_id = int(row[0])
-        self.app.push_screen(
-            SelectProfileModal(exclude_id=profile_a_id),
-            lambda pid: self.run_worker(
-                self._do_compare(profile_a_id, pid), exclusive=False
-            ) if pid is not None else None,
-        )
-
-    async def _do_compare(self, id_a: int, id_b: int) -> None:
-        try:
-            prof_a = await get_profile(INDEX_DB, id_a)
-            prof_b = await get_profile(INDEX_DB, id_b)
-            if not prof_a or not prof_b:
-                self.app.notify("No se encontraron ambos perfiles", severity="error")
-                return
-            folder_a = Path(prof_a["folder_path"])
-            folder_b = Path(prof_b["folder_path"])
-            result = await compare_catalogs(folder_a, folder_b)
-            self.app.push_screen(
-                CompareResultModal(
-                    prof_a=prof_a,
-                    prof_b=prof_b,
-                    stats=result,
-                ),
-                lambda merge: self.run_worker(
-                    self._do_merge(id_a, id_b), exclusive=False
-                ) if merge else None,
-            )
-        except Exception as exc:
-            self.app.notify(f"Error al comparar: {exc}", severity="error")
-
-    async def _do_merge(self, keep_id: int, remove_id: int) -> None:
-        self.app.push_screen(
-            MergeConfirmModal(),
-            lambda confirmed: self.run_worker(
-                self._execute_merge(keep_id, remove_id), exclusive=False
-            ) if confirmed else None,
-        )
-
-    async def _execute_merge(self, keep_id: int, remove_id: int) -> None:
-        try:
-            moved = await merge_profiles(INDEX_DB, keep_id, remove_id)
-            self.app.notify(
-                f"Fusión completada — {moved} URL(s) reasignadas", severity="information"
-            )
-            await self._load_profiles()
-        except Exception as exc:
-            self.app.notify(f"Error al fusionar: {exc}", severity="error")
+        """Abre la pantalla de detección global de perfiles duplicados."""
+        self.app.push_screen(DuplicateScreen())
 
     # ── Actualizar Todo (batch scan, sin descargar) ────────────────────────────
 
@@ -1101,209 +1177,725 @@ class CompactConfirmModal(ModalScreen):
         self.dismiss(event.button.id == "btn-compact-ok")
 
 
-# ── SelectProfileModal ───────────────────────────────────────────────────────
+# ── DuplicateScreen ──────────────────────────────────────────────────────────
 
-class SelectProfileModal(ModalScreen):
+def _dup_keep_remove(pair: dict) -> tuple[int, int, str, str]:
     """
-    Muestra la lista de perfiles para seleccionar el perfil B en una comparación.
-    Retorna el profile_id seleccionado, o None si se cancela.
+    Dado un par, retorna (keep_id, remove_id, keep_name, remove_name).
+    El perfil más antiguo (created_at menor, o id menor) absorbe al más nuevo.
     """
+    from datetime import datetime
+
+    def _dt(s: str | None) -> datetime:
+        if not s:
+            return datetime.max
+        try:
+            return datetime.fromisoformat(s)
+        except Exception:
+            return datetime.max
+
+    dt_a = _dt(pair.get("created_at_a"))
+    dt_b = _dt(pair.get("created_at_b"))
+    if dt_a <= dt_b:
+        return pair["id_a"], pair["id_b"], pair["name_a"], pair["name_b"]
+    return pair["id_b"], pair["id_a"], pair["name_b"], pair["name_a"]
+
+
+class HashScanWarningModal(ModalScreen):
+    """Advertencia antes de iniciar la comparación intensiva por hashes."""
 
     DEFAULT_CSS = """
-    SelectProfileModal > Vertical {
-        width: 60;
+    HashScanWarningModal > Vertical {
+        width: 68;
         height: auto;
-        max-height: 30;
-        border: solid $primary;
+        border: solid $warning;
         background: $surface;
         padding: 1 2;
     }
-    SelectProfileModal Label#spm-title {
-        text-style: bold;
-        margin-bottom: 1;
-    }
-    SelectProfileModal DataTable {
-        height: 15;
-        margin-bottom: 1;
-    }
-    SelectProfileModal Horizontal {
-        height: 3;
-        align: center middle;
-    }
+    HashScanWarningModal Label { margin-bottom: 1; }
+    HashScanWarningModal Horizontal { height: 3; align: center middle; }
     """
-
-    def __init__(self, exclude_id: int) -> None:
-        super().__init__()
-        self._exclude_id = exclude_id
-        self._profiles: list[dict] = []
 
     def compose(self) -> ComposeResult:
         with Vertical():
-            yield Label("Selecciona el perfil B para comparar", id="spm-title")
-            yield DataTable(id="spm-table", cursor_type="row", zebra_stripes=True)
-            with Horizontal():
-                yield Button("Cancelar", id="btn-spm-cancel", variant="default")
-                yield Button("Seleccionar", id="btn-spm-ok", variant="primary")
-
-    async def on_mount(self) -> None:
-        tbl = self.query_one("#spm-table", DataTable)
-        tbl.add_columns("ID", "Nombre", "Carpeta")
-        self._profiles = await list_profiles(INDEX_DB)
-        for p in self._profiles:
-            if p["id"] == self._exclude_id:
-                continue
-            tbl.add_row(
-                str(p["id"]),
-                p["display_name"],
-                p["folder_path"] or "",
+            yield Label("↺ Comparación por hashes", markup=True)
+            yield Label(
+                "Esta fase compara los hashes SHA-256 ya almacenados en tus\n"
+                "bases de datos — [bold]no escanea archivos en disco[/bold].\n\n"
+                "Se ejecuta como una consulta SQL directa (INNER JOIN).\n"
+                "Con catálogos de >50,000 archivos puede tardar varios minutos.\n\n"
+                "Puedes seguir viendo los resultados de la Fase 1\n"
+                "mientras el scan corre en background.",
+                markup=True,
             )
-        self.query_one("#btn-spm-cancel", Button).focus()
+            with Horizontal():
+                yield Button("Cancelar",    id="btn-hsw-cancel", variant="default")
+                yield Button("Iniciar scan", id="btn-hsw-ok",    variant="warning")
+
+    def on_mount(self) -> None:
+        self.query_one("#btn-hsw-cancel", Button).focus()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "btn-spm-cancel":
-            self.dismiss(None)
-        elif event.button.id == "btn-spm-ok":
-            tbl = self.query_one("#spm-table", DataTable)
-            if tbl.cursor_row is not None:
-                row = tbl.get_row_at(tbl.cursor_row)
-                self.dismiss(int(row[0]))
-            else:
-                self.app.notify("Selecciona un perfil de la lista", severity="warning")
-
-    def on_data_table_row_selected(self, _: DataTable.RowSelected) -> None:
-        tbl = self.query_one("#spm-table", DataTable)
-        if tbl.cursor_row is not None:
-            row = tbl.get_row_at(tbl.cursor_row)
-            self.dismiss(int(row[0]))
+        self.dismiss(event.button.id == "btn-hsw-ok")
 
 
-# ── CompareResultModal ───────────────────────────────────────────────────────
-
-class CompareResultModal(ModalScreen):
+class OrphanActionModal(ModalScreen):
     """
-    Muestra el resultado de la comparación de hashes entre dos perfiles.
-    Retorna True si el usuario quiere fusionar, False si no.
+    Pregunta qué hacer con los archivos huérfanos tras una fusión.
+    Retorna "delete" | "rename" | "ignore".
     """
 
     DEFAULT_CSS = """
-    CompareResultModal > Vertical {
-        width: 65;
+    OrphanActionModal > Vertical {
+        width: 68;
         height: auto;
         border: solid $accent;
         background: $surface;
         padding: 1 2;
     }
-    CompareResultModal Label#crm-title {
-        text-style: bold;
-        margin-bottom: 1;
-    }
-    CompareResultModal Label#crm-stats {
-        margin-bottom: 1;
-    }
-    CompareResultModal Label#crm-merge-hint {
-        color: $warning;
-        margin-bottom: 1;
-    }
-    CompareResultModal Horizontal {
-        height: 3;
-        align: center middle;
-    }
+    OrphanActionModal Label { margin-bottom: 1; }
+    OrphanActionModal Horizontal { height: 3; align: center middle; }
     """
 
-    def __init__(self, prof_a: dict, prof_b: dict, stats: dict) -> None:
+    def __init__(self, folder: str, n_orphans: int) -> None:
         super().__init__()
-        self._prof_a = prof_a
-        self._prof_b = prof_b
-        self._stats  = stats
+        self._folder   = folder
+        self._n_orphans = n_orphans
 
     def compose(self) -> ComposeResult:
-        s      = self._stats
-        name_a = self._prof_a["display_name"]
-        name_b = self._prof_b["display_name"]
-        pct    = f"{s['coverage'] * 100:.1f}%" if s.get("coverage") is not None else "N/A"
-        unique = len(s.get("unique_to_b", []))
-
-        hint = ""
-        if s.get("coverage", 0) >= 0.80:
-            hint = (
-                f"[bold yellow]⚠ {pct} de B existe en A — "
-                "posibles perfiles duplicados.[/bold yellow]\n"
-                "Puedes fusionar B en A (B se eliminará)."
-            )
-        elif s.get("matches", 0) > 0:
-            hint = f"[dim]{pct} de coincidencia — no se recomienda fusionar.[/dim]"
-        else:
-            hint = "[dim]Sin archivos en común.[/dim]"
-
         with Vertical():
-            yield Label("⊗ Resultado de comparación", id="crm-title")
+            yield Label("Archivos huérfanos", markup=True)
             yield Label(
-                f"[bold]A:[/bold] {name_a}  ({s.get('total_a', 0)} archivos)\n"
-                f"[bold]B:[/bold] {name_b}  ({s.get('total_b', 0)} archivos)\n"
-                f"Coincidencias (hash): [bold]{s.get('matches', 0)}[/bold]  "
-                f"({pct} de B)  |  Exclusivos en B: {unique}",
-                id="crm-stats",
+                f"[bold]{self._n_orphans}[/bold] archivo(s) en\n"
+                f"[dim]{self._folder}[/dim]\n"
+                "ya existen en el perfil destino (mismo hash).\n\n"
+                "¿Qué deseas hacer con ellos?",
                 markup=True,
             )
-            yield Label(hint, id="crm-merge-hint", markup=True)
             with Horizontal():
-                yield Button("Cerrar",            id="btn-crm-close",  variant="default")
-                yield Button("Fusionar B → A",    id="btn-crm-merge",  variant="warning")
+                yield Button("Borrar",           id="btn-oa-delete",  variant="error")
+                yield Button("Renombrar carpeta", id="btn-oa-rename",  variant="warning")
+                yield Button("Ignorar",           id="btn-oa-ignore",  variant="default")
+
+    def on_mount(self) -> None:
+        self.query_one("#btn-oa-ignore", Button).focus()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        self.dismiss(event.button.id == "btn-crm-merge")
+        mapping = {
+            "btn-oa-delete": "delete",
+            "btn-oa-rename": "rename",
+            "btn-oa-ignore": "ignore",
+        }
+        self.dismiss(mapping.get(event.button.id, "ignore"))
 
 
-# ── MergeConfirmModal ────────────────────────────────────────────────────────
-
-class MergeConfirmModal(ModalScreen):
+class DuplicateScreen(Screen):
     """
-    Confirmación final antes de ejecutar la fusión de perfiles.
-    Retorna True si el usuario confirma.
+    Pantalla de detección y fusión de perfiles duplicados.
+
+    Fase 1 (automática al montar): compara URLs y nombres de todos los pares.
+      - URL match o nombre >= 0.80 → sección "Revisión / Auto"
+    Fase 2 (manual, bajo demanda): SQL ATTACH INNER JOIN en catalog.db.
+      - coverage >= 0.51 → pasa a "Fusión automática"
+      - coverage 0.10–0.50 → pasa a "Revisión manual" con porcentaje
     """
+
+    BINDINGS = [("escape", "go_back", "Volver")]
+
+    # ── constantes de umbral ───────────────────────────────────────────────────
+    HASH_AUTO   = 0.51   # coverage >= HASH_AUTO → fusión automática
+    HASH_MIN    = 0.10   # coverage < HASH_MIN   → ruido, ignorar
+    NAME_PROB   = 0.80   # nombre similar ≥ PROB → PROBABLE
+    NAME_POSS   = 0.60   # nombre similar ≥ POSS → POSSIBLE
+
+    def __init__(self) -> None:
+        super().__init__()
+        # Pares confirmados para fusión automática
+        self._auto:   list[dict] = []
+        # Pares para revisión manual  {…, "checked": bool}
+        self._review: list[dict] = []
+        # Set de exclusiones cargadas de index.db
+        self._exclusions: set[tuple[int, int]] = set()
+        # Pares pendientes de scan de hashes (los que no fueron DEFINITE en fase 1)
+        self._phase2_candidates: list[dict] = []
+        self._phase2_running = False
+        # Perfiles pendientes de compactar después de fusiones
+        self._pending_compact: list[tuple[int, str]] = []
+
+    def compose(self) -> ComposeResult:
+        yield Header("⊗ Buscar perfiles duplicados")
+        with Vertical(id="dup-main"):
+            yield Label("", id="dup-status")
+            yield ProgressBar(id="dup-progress", show_eta=False, total=100)
+
+            # ── Sección automática ─────────────────────────────────────────
+            yield Label(
+                "[bold green]FUSIÓN AUTOMÁTICA[/]  "
+                "[dim](URL match o ≥51% hashes en común)[/]",
+                id="dup-auto-title", markup=True,
+            )
+            yield DataTable(
+                id="dup-auto-table",
+                cursor_type="row",
+                zebra_stripes=True,
+            )
+
+            # ── Sección revisión ───────────────────────────────────────────
+            yield Label(
+                "[bold yellow]REVISIÓN MANUAL[/]  "
+                "[dim](nombre similar o hash 10–50%)[/]",
+                id="dup-review-title", markup=True,
+            )
+            yield DataTable(
+                id="dup-review-table",
+                cursor_type="row",
+                zebra_stripes=True,
+            )
+
+            # ── Botones de acción ──────────────────────────────────────────
+            with Horizontal(id="dup-actions"):
+                yield Button(
+                    "↺ Comparar por hashes",
+                    id="btn-dup-hash", variant="default",
+                )
+                yield Button(
+                    "✓ Ejecutar fusiones auto",
+                    id="btn-dup-exec-auto", variant="success", disabled=True,
+                )
+                yield Button(
+                    "⟳ Fusionar seleccionados",
+                    id="btn-dup-exec-manual", variant="warning", disabled=True,
+                )
+                yield Button(
+                    "✕ Marcar como distintos",
+                    id="btn-dup-exclude", variant="default", disabled=True,
+                )
+                yield Button("← Volver", id="btn-dup-back")
+
+        yield Footer()
+
+    async def on_mount(self) -> None:
+        # Configurar columnas de las tablas
+        auto_tbl = self.query_one("#dup-auto-table", DataTable)
+        auto_tbl.add_columns("✓", "Mantener", "←", "Eliminar", "Razón")
+
+        rev_tbl = self.query_one("#dup-review-table", DataTable)
+        rev_tbl.add_columns("☐", "Perfil A", "↔", "Perfil B", "Similitud")
+
+        # Cargar exclusiones y lanzar fase 1
+        self._exclusions = await get_exclusions(INDEX_DB)
+        self.run_worker(self._scan_phase1(), exclusive=False, name="dup-phase1")
+
+    # ── Helpers UI ────────────────────────────────────────────────────────────
+
+    def _set_status(self, msg: str) -> None:
+        try:
+            self.query_one("#dup-status", Label).update(msg)
+        except Exception:
+            pass
+
+    def _set_progress(self, done: int, total: int) -> None:
+        try:
+            bar = self.query_one("#dup-progress", ProgressBar)
+            bar.total   = max(total, 1)
+            bar.progress = done
+        except Exception:
+            pass
+
+    def _refresh_buttons(self) -> None:
+        try:
+            self.query_one("#btn-dup-exec-auto",   Button).disabled = len(self._auto)   == 0
+            self.query_one("#btn-dup-exec-manual", Button).disabled = not any(
+                p.get("checked") for p in self._review
+            )
+            self.query_one("#btn-dup-exclude",     Button).disabled = not any(
+                p.get("checked") for p in self._review
+            )
+        except Exception:
+            pass
+
+    def _excluded(self, id_a: int, id_b: int) -> bool:
+        lo, hi = min(id_a, id_b), max(id_a, id_b)
+        return (lo, hi) in self._exclusions
+
+    def _add_auto_row(self, pair: dict) -> None:
+        """Agrega un par a la tabla de fusión automática."""
+        keep_id, remove_id, keep_name, remove_name = _dup_keep_remove(pair)
+        tbl = self.query_one("#dup-auto-table", DataTable)
+        tbl.add_row(
+            "✓",
+            keep_name,
+            "←",
+            remove_name,
+            pair.get("reason", ""),
+            key=f"auto_{keep_id}_{remove_id}",
+        )
+
+    def _add_review_row(self, pair: dict) -> None:
+        """Agrega un par a la tabla de revisión manual."""
+        tbl = self.query_one("#dup-review-table", DataTable)
+        tbl.add_row(
+            "☐",
+            pair["name_a"],
+            "↔",
+            pair["name_b"],
+            pair.get("reason", ""),
+            key=f"rev_{pair['id_a']}_{pair['id_b']}",
+        )
+
+    # ── Fase 1: URL + nombre ──────────────────────────────────────────────────
+
+    async def _scan_phase1(self) -> None:
+        self._set_status("[bold]Fase 1:[/] comparando URLs y nombres…")
+        try:
+            profiles = await list_profiles(INDEX_DB)
+            # Cargar URLs de cada perfil (necesitamos artist_id y site)
+            full: list[dict] = []
+            for p in profiles:
+                fp = await get_profile(INDEX_DB, p["id"])
+                if fp:
+                    full.append(fp)
+
+            n = len(full)
+            total_pairs = n * (n - 1) // 2
+            done = 0
+
+            for i in range(n):
+                for j in range(i + 1, n):
+                    a, b = full[i], full[j]
+
+                    if self._excluded(a["id"], b["id"]):
+                        done += 1
+                        continue
+
+                    pair_base = {
+                        "id_a": a["id"], "name_a": a["display_name"],
+                        "folder_a": a["folder_path"], "created_at_a": a.get("created_at"),
+                        "id_b": b["id"], "name_b": b["display_name"],
+                        "folder_b": b["folder_path"], "created_at_b": b.get("created_at"),
+                    }
+
+                    # ── Nivel 1: URL match ─────────────────────────────────
+                    url_match = _url_overlap(a["urls"], b["urls"])
+                    if url_match:
+                        pair = {**pair_base,
+                                "tier":   "url_match",
+                                "reason": f"URL: {url_match}"}
+                        self._auto.append(pair)
+                        self._add_auto_row(pair)
+                        self._refresh_buttons()
+                        done += 1
+                        self._set_progress(done, total_pairs)
+                        continue
+
+                    # ── Nivel 2: similitud de nombre ───────────────────────
+                    sim = _name_similarity(a["display_name"], b["display_name"])
+                    if sim >= self.NAME_PROB:
+                        pair = {**pair_base,
+                                "tier":    "name_similar",
+                                "reason":  f"nombre {sim*100:.0f}% similar",
+                                "checked": False}
+                        self._review.append(pair)
+                        self._phase2_candidates.append(pair)
+                        self._add_review_row(pair)
+                        self._refresh_buttons()
+                    elif sim >= self.NAME_POSS:
+                        pair = {**pair_base,
+                                "tier":    "name_possible",
+                                "reason":  f"nombre {sim*100:.0f}% similar",
+                                "checked": False}
+                        self._review.append(pair)
+                        self._phase2_candidates.append(pair)
+                        self._add_review_row(pair)
+                        self._refresh_buttons()
+                    else:
+                        # Sin match de URL ni nombre → candidato solo para hash
+                        self._phase2_candidates.append({
+                            **pair_base,
+                            "tier": "unknown", "reason": "",
+                        })
+
+                    done += 1
+                    self._set_progress(done, total_pairs)
+
+            n_auto   = len(self._auto)
+            n_review = len(self._review)
+            self._set_status(
+                f"[bold]Fase 1 completa[/] — "
+                f"{n_auto} para fusión automática · "
+                f"{n_review} para revisión · "
+                f"{total_pairs} pares analizados"
+            )
+            self._set_progress(total_pairs, total_pairs)
+
+        except Exception as exc:
+            import traceback as _tb
+            self._set_status(f"[red]Error en fase 1: {exc}[/]")
+            self.log(_tb.format_exc())
+
+    # ── Fase 2: hashes via ATTACH ─────────────────────────────────────────────
+
+    async def _scan_phase2(self) -> None:
+        """
+        Para cada par aún sin resolución definitiva, ejecuta compare_by_hash_join.
+        Actualiza las tablas en tiempo real conforme llegan los resultados.
+        """
+        self._phase2_running = True
+        try:
+            # Solo pares que NO son ya URL match (esos ya están en auto)
+            candidates = [
+                p for p in self._phase2_candidates
+                if p.get("tier") != "url_match"
+                and not self._excluded(p["id_a"], p["id_b"])
+            ]
+            total = len(candidates)
+            if total == 0:
+                self._set_status("[dim]No hay pares candidatos para scan de hashes.[/]")
+                return
+
+            self._set_status(
+                f"[bold]Fase 2:[/] comparando hashes ({total} par(es))…"
+            )
+
+            for done, pair in enumerate(candidates):
+                folder_a = Path(pair["folder_a"])
+                folder_b = Path(pair["folder_b"])
+                try:
+                    result = await compare_by_hash_join(folder_a, folder_b)
+                except Exception as exc:
+                    self.log(f"Hash join error ({pair['name_a']} ↔ {pair['name_b']}): {exc}")
+                    self._set_progress(done + 1, total)
+                    continue
+
+                coverage = result.get("coverage", 0.0)
+                total_a  = result.get("total_a", 0)
+                total_b  = result.get("total_b", 0)
+
+                if coverage < self.HASH_MIN:
+                    # Sin relación → ignorar
+                    pass
+                elif coverage >= self.HASH_AUTO:
+                    # Fusión automática
+                    new_pair = {
+                        **pair,
+                        "tier":   "hash_definite",
+                        "reason": f"{coverage*100:.1f}% hashes en común "
+                                  f"({result['matches']}/{min(total_a,total_b)})",
+                    }
+                    self._auto.append(new_pair)
+                    self._add_auto_row(new_pair)
+                    # Si estaba en revisión, removerlo
+                    self._remove_review_pair(pair["id_a"], pair["id_b"])
+                    self._refresh_buttons()
+                else:
+                    # Solo mostrar si no está ya en revisión (evitar duplicar)
+                    existing = self._find_review_pair(pair["id_a"], pair["id_b"])
+                    new_reason = (
+                        f"{coverage*100:.1f}% hashes en común "
+                        f"({result['matches']}/{min(total_a,total_b)})"
+                    )
+                    if existing:
+                        existing["reason"] = new_reason
+                        # Actualizar celda de razón en la tabla
+                        self._update_review_reason(pair["id_a"], pair["id_b"], new_reason)
+                    else:
+                        new_pair = {
+                            **pair,
+                            "tier":    "hash_probable",
+                            "reason":  new_reason,
+                            "checked": False,
+                        }
+                        self._review.append(new_pair)
+                        self._add_review_row(new_pair)
+                        self._refresh_buttons()
+
+                self._set_progress(done + 1, total)
+
+            n_auto   = len(self._auto)
+            n_review = len(self._review)
+            self._set_status(
+                f"[bold]Fase 2 completa[/] — "
+                f"{n_auto} para fusión automática · "
+                f"{n_review} para revisión"
+            )
+        except Exception as exc:
+            import traceback as _tb
+            self._set_status(f"[red]Error en fase 2: {exc}[/]")
+            self.log(_tb.format_exc())
+        finally:
+            self._phase2_running = False
+
+    def _find_review_pair(self, id_a: int, id_b: int) -> dict | None:
+        for p in self._review:
+            if {p["id_a"], p["id_b"]} == {id_a, id_b}:
+                return p
+        return None
+
+    def _remove_review_pair(self, id_a: int, id_b: int) -> None:
+        self._review = [
+            p for p in self._review
+            if {p["id_a"], p["id_b"]} != {id_a, id_b}
+        ]
+        # Intentar quitar la fila de la tabla
+        key = f"rev_{min(id_a,id_b)}_{max(id_a,id_b)}"
+        try:
+            tbl = self.query_one("#dup-review-table", DataTable)
+            # DataTable no tiene remove_row por key directo; marcamos la fila
+            # con tachado como proxy visual (la fila migró a auto)
+            tbl.update_cell(key, "☐", "[dim]→auto[/]", update_width=False)
+        except Exception:
+            pass
+
+    def _update_review_reason(self, id_a: int, id_b: int, reason: str) -> None:
+        key = f"rev_{id_a}_{id_b}"
+        try:
+            tbl = self.query_one("#dup-review-table", DataTable)
+            tbl.update_cell(key, "Similitud", reason, update_width=False)
+        except Exception:
+            pass
+
+    # ── Toggle checkbox en tabla de revisión ──────────────────────────────────
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        if event.data_table.id != "dup-review-table":
+            return
+        row_key = str(event.row_key.value) if event.row_key else None
+        if not row_key:
+            return
+        # Buscar el par por row_key  "rev_{id_a}_{id_b}"
+        parts = row_key.removeprefix("rev_").split("_")
+        if len(parts) != 2:
+            return
+        try:
+            id_a, id_b = int(parts[0]), int(parts[1])
+        except ValueError:
+            return
+
+        pair = self._find_review_pair(id_a, id_b)
+        if not pair:
+            return
+        pair["checked"] = not pair.get("checked", False)
+        mark = "☑" if pair["checked"] else "☐"
+        try:
+            tbl = self.query_one("#dup-review-table", DataTable)
+            tbl.update_cell(row_key, "☐", mark, update_width=False)
+        except Exception:
+            pass
+        self._refresh_buttons()
+
+    # ── Botones ───────────────────────────────────────────────────────────────
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        bid = event.button.id
+        if bid == "btn-dup-back":
+            self.action_go_back()
+        elif bid == "btn-dup-hash":
+            if not self._phase2_running:
+                self.app.push_screen(
+                    HashScanWarningModal(),
+                    lambda ok: self.run_worker(
+                        self._scan_phase2(), exclusive=False, name="dup-phase2"
+                    ) if ok else None,
+                )
+        elif bid == "btn-dup-exec-auto":
+            if self._auto:
+                self.run_worker(
+                    self._execute_merges(list(self._auto)), exclusive=False
+                )
+        elif bid == "btn-dup-exec-manual":
+            selected = [p for p in self._review if p.get("checked")]
+            if selected:
+                self.run_worker(
+                    self._execute_merges(selected), exclusive=False
+                )
+        elif bid == "btn-dup-exclude":
+            self.run_worker(self._exclude_selected(), exclusive=False)
+
+    def action_go_back(self) -> None:
+        self.app.pop_screen()
+
+    # ── Excluir pares seleccionados ───────────────────────────────────────────
+
+    async def _exclude_selected(self) -> None:
+        selected = [p for p in self._review if p.get("checked")]
+        for pair in selected:
+            await add_exclusion(INDEX_DB, pair["id_a"], pair["id_b"])
+            lo, hi = min(pair["id_a"], pair["id_b"]), max(pair["id_a"], pair["id_b"])
+            self._exclusions.add((lo, hi))
+        self._review = [p for p in self._review if not p.get("checked")]
+        self.app.notify(
+            f"{len(selected)} par(es) marcados como distintos — no aparecerán de nuevo",
+            severity="information",
+        )
+        self._refresh_buttons()
+
+    # ── Ejecutar fusiones ─────────────────────────────────────────────────────
+
+    async def _execute_merges(self, pairs: list[dict]) -> None:
+        """
+        Para cada par: migra archivos únicos, fusiona el índice,
+        gestiona huérfanos y ofrece compactar.
+        """
+        merged_count  = 0
+        total_moved   = 0
+        total_orphans = 0
+        errors: list[str] = []
+        folders_to_compact: list[tuple[int, str]] = []
+
+        for pair in pairs:
+            keep_id, remove_id, keep_name, remove_name = _dup_keep_remove(pair)
+            keep_folder   = Path(pair["folder_a"] if pair["id_a"] == keep_id else pair["folder_b"])
+            remove_folder = Path(pair["folder_b"] if pair["id_a"] == keep_id else pair["folder_a"])
+
+            self._set_status(
+                f"Fusionando: [bold]{remove_name}[/] → [bold]{keep_name}[/]…"
+            )
+
+            # ── Migrar archivos únicos ────────────────────────────────────
+            try:
+                result = await migrate_unique_files(remove_folder, keep_folder)
+                total_moved   += result["moved"]
+                total_orphans += result["orphaned"]
+
+                if result["errors"]:
+                    errors.extend(result["errors"][:5])
+
+                # ── Gestionar huérfanos ───────────────────────────────────
+                if result["orphaned"] > 0:
+                    action = await self.app.push_screen_wait(
+                        OrphanActionModal(str(remove_folder), result["orphaned"])
+                    )
+                    await asyncio.to_thread(
+                        _handle_orphans,
+                        remove_folder,
+                        result["orphaned_paths"],
+                        action,
+                    )
+            except Exception as exc:
+                errors.append(f"Migración {remove_name}: {exc}")
+
+            # ── Fusionar índice ───────────────────────────────────────────
+            try:
+                await merge_profiles(INDEX_DB, keep_id, remove_id)
+                merged_count += 1
+                if result["moved"] > 0:
+                    folders_to_compact.append((keep_id, str(keep_folder)))
+            except Exception as exc:
+                errors.append(f"Índice {remove_name}: {exc}")
+
+        # ── Resumen ───────────────────────────────────────────────────────
+        msg = (
+            f"[bold green]✓ {merged_count} fusión(es) completada(s)[/]\n"
+            f"  {total_moved} archivo(s) migrados · "
+            f"{total_orphans} huérfanos gestionados"
+        )
+        if errors:
+            msg += f"\n[red]{len(errors)} error(es): {errors[0]}…[/]"
+        self._set_status(msg)
+
+        # Limpiar pares ejecutados de las listas internas
+        merged_ids = {(p["id_a"], p["id_b"]) for p in pairs}
+        self._auto   = [p for p in self._auto   if (p["id_a"],p["id_b"]) not in merged_ids]
+        self._review = [p for p in self._review if (p["id_a"],p["id_b"]) not in merged_ids]
+        self._refresh_buttons()
+
+        # ── Ofrecer compactar ─────────────────────────────────────────────
+        if folders_to_compact:
+            self.app.push_screen(
+                CompactAfterMergeModal(folders_to_compact),
+                lambda ok: self.run_worker(
+                    _compact_folders(folders_to_compact), exclusive=False
+                ) if ok else None,
+            )
+
+
+def _handle_orphans(
+    folder: Path,
+    orphaned_paths: list[Path],
+    action: str,
+) -> None:
+    """Ejecutado en thread — borra o renombra los archivos/carpeta huérfanos."""
+    import shutil
+
+    if action == "delete":
+        for p in orphaned_paths:
+            try:
+                p.unlink(missing_ok=True)
+            except Exception:
+                pass
+        # Borrar carpeta si quedó vacía (solo tiene catalog.db)
+        try:
+            remaining = [f for f in folder.iterdir()
+                         if f.name != "catalog.db" and not f.name.endswith(".db")]
+            if not remaining:
+                shutil.rmtree(folder, ignore_errors=True)
+        except Exception:
+            pass
+
+    elif action == "rename":
+        new_name = folder.parent / f"orphan_{folder.name}"
+        try:
+            folder.rename(new_name)
+        except Exception:
+            pass  # Si falla (ya existe, permisos), se deja como está
+
+
+async def _compact_folders(folders: list[tuple[int, str]]) -> None:
+    """Compacta la numeración de las carpetas que recibieron archivos migrados."""
+    from ..catalog import apply_compaction, get_numbered_files, plan_compaction
+
+    for _, folder_str in folders:
+        folder = Path(folder_str)
+        try:
+            files = await get_numbered_files(folder)
+            plan  = plan_compaction(files)
+            if plan:
+                new_total = files[-1][0] if files else 0
+                await apply_compaction(folder, plan, new_total)
+        except Exception:
+            pass
+
+
+class CompactAfterMergeModal(ModalScreen):
+    """Ofrece compactar los perfiles que recibieron archivos tras fusionar."""
 
     DEFAULT_CSS = """
-    MergeConfirmModal > Vertical {
-        width: 60;
+    CompactAfterMergeModal > Vertical {
+        width: 65;
         height: auto;
-        border: solid $error;
+        border: solid $primary;
         background: $surface;
         padding: 1 2;
     }
-    MergeConfirmModal Label#mcm-title {
-        color: $error;
-        text-style: bold;
-        margin-bottom: 1;
-    }
-    MergeConfirmModal Label#mcm-body {
-        margin-bottom: 1;
-    }
-    MergeConfirmModal Horizontal {
-        height: 3;
-        align: center middle;
-    }
+    CompactAfterMergeModal Label { margin-bottom: 1; }
+    CompactAfterMergeModal Horizontal { height: 3; align: center middle; }
     """
 
+    def __init__(self, folders: list[tuple[int, str]]) -> None:
+        super().__init__()
+        self._folders = folders
+
     def compose(self) -> ComposeResult:
+        names = ", ".join(Path(f).name for _, f in self._folders[:3])
+        if len(self._folders) > 3:
+            names += f" y {len(self._folders)-3} más"
         with Vertical():
-            yield Label("⚠ Confirmar fusión", id="mcm-title")
+            yield Label("¿Compactar numeración?", markup=True)
             yield Label(
-                "El perfil B será eliminado del índice.\n"
-                "Sus URLs se reasignarán al perfil A.\n\n"
-                "[bold]Los archivos en disco NO se mueven.[/bold]\n"
-                "Esta acción no se puede deshacer.",
-                id="mcm-body",
+                f"Los archivos migrados se agregaron al final de la numeración.\n"
+                f"Perfiles afectados: [bold]{names}[/bold]\n\n"
+                "Compactar elimina huecos en la secuencia de números.",
                 markup=True,
             )
             with Horizontal():
-                yield Button("Cancelar",  id="btn-mcm-cancel", variant="default")
-                yield Button("Confirmar", id="btn-mcm-ok",     variant="error")
+                yield Button("Ahora no", id="btn-cam-no",  variant="default")
+                yield Button("Compactar", id="btn-cam-ok", variant="primary")
 
     def on_mount(self) -> None:
-        self.query_one("#btn-mcm-cancel", Button).focus()
+        self.query_one("#btn-cam-ok", Button).focus()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        self.dismiss(event.button.id == "btn-mcm-ok")
+        self.dismiss(event.button.id == "btn-cam-ok")
 
 
 # ── ArtistScreen ────────────────────────────────────────────────────────────
@@ -1354,10 +1946,21 @@ class ArtistScreen(Screen):
         with Horizontal(id="controls-row"):
             yield Label("Workers:")
             yield Input("3", id="workers-input", placeholder="3")
-            yield Label("Filtro ext:")
-            yield Input("", id="ext-filter-input", placeholder="jpg,png,mp4")
             yield Label("Pre-scan:")
             yield Input("", id="prescan-input", placeholder="Carpeta de archivos existentes")
+
+        # Filtro de tipos de archivo por perfil
+        yield Label("  TIPOS A DESCARGAR  (vacío = todos)", classes="section-label")
+        with Horizontal(id="artist-filter-groups"):
+            for group_id, (label, _exts) in EXT_GROUPS.items():
+                yield Checkbox(label, value=False, id=f"artist-chk-{group_id}")
+        with Horizontal(id="artist-filter-custom-row"):
+            yield Label("Ext. extra:", classes="batch-cfg-label")
+            yield Input(
+                "", id="artist-ext-custom",
+                placeholder="psd,clip  (separadas por coma)",
+                classes="batch-cfg-ext",
+            )
 
         # Acciones
         with Horizontal(id="actions-row"):
@@ -1419,10 +2022,23 @@ class ArtistScreen(Screen):
                 f"{_fmt_size(stats['total_size'])}  ·  última sync: {last}"
             )
 
-            # Restaurar filtro guardado
-            ext = profile.get("ext_filter", "")
-            if ext:
-                self.query_one("#ext-filter-input", Input).value = ext
+            # Restaurar filtro guardado (formato JSON nuevo o legacy)
+            _stored_ext = profile.get("ext_filter", "")
+            if _stored_ext:
+                _group_ids, _ext_set = _decode_profile_filter(_stored_ext)
+                # Marcar grupos
+                for _gid in _group_ids:
+                    try:
+                        self.query_one(f"#artist-chk-{_gid}", Checkbox).value = True
+                    except Exception:
+                        pass
+                # Legacy: si no hay group_ids pero sí ext_set, dejar custom
+                if not _group_ids and _ext_set:
+                    _legacy_txt = ",".join(e.lstrip(".") for e in sorted(_ext_set))
+                    try:
+                        self.query_one("#artist-ext-custom", Input).value = _legacy_txt
+                    except Exception:
+                        pass
 
             # Tabla de fuentes
             self._populate_sources(profile["urls"])
@@ -1526,9 +2142,16 @@ class ArtistScreen(Screen):
             return
         url_id = int(keys[row_idx].value)
         try:
+            # Capturar profile_id antes del DELETE para refrescar la metadata.
             async with aiosqlite.connect(INDEX_DB) as db:
+                async with db.execute(
+                    "SELECT profile_id FROM profile_urls WHERE id = ?", (url_id,)
+                ) as cur:
+                    prow = await cur.fetchone()
                 await db.execute("DELETE FROM profile_urls WHERE id = ?", (url_id,))
                 await db.commit()
+            if prow:
+                await sync_profile_meta(INDEX_DB, prow[0])
             await self._load_profile()
             self.app.notify("URL eliminada")
         except Exception as exc:
@@ -1628,11 +2251,33 @@ class ArtistScreen(Screen):
                 pass
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        if event.input.id == "ext-filter-input" and self._profile:
-            self.run_worker(
-                update_profile_ext_filter(INDEX_DB, self._profile["id"], event.value),
-                exclusive=False,
-            )
+        if event.input.id == "artist-ext-custom" and self._profile:
+            self._save_artist_filter()
+
+    def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
+        if event.checkbox.id and event.checkbox.id.startswith("artist-chk-") and self._profile:
+            self._save_artist_filter()
+
+    def _save_artist_filter(self) -> None:
+        """Serializa la selección de checkboxes + custom y guarda en la BD."""
+        if not self._profile:
+            return
+        selected_groups: list[str] = []
+        for _gid in EXT_GROUPS:
+            try:
+                if self.query_one(f"#artist-chk-{_gid}", Checkbox).value:
+                    selected_groups.append(_gid)
+            except Exception:
+                pass
+        try:
+            custom_val = self.query_one("#artist-ext-custom", Input).value.strip()
+        except Exception:
+            custom_val = ""
+        encoded = _encode_profile_filter(selected_groups, custom_val)
+        self.run_worker(
+            update_profile_ext_filter(INDEX_DB, self._profile["id"], encoded),
+            exclusive=False,
+        )
 
     # ── Download ──────────────────────────────────────────────────────────
 
@@ -1688,7 +2333,20 @@ class ArtistScreen(Screen):
             workers = int(self.query_one("#workers-input", Input).value or "3")
         except ValueError:
             workers = 3
-        ext_filter = _parse_ext_filter(self.query_one("#ext-filter-input", Input).value)
+        # Leer ext_filter desde los checkboxes de grupos + campo custom
+        ext_filter: set[str] = set()
+        for _gid, (_lbl, _exts) in EXT_GROUPS.items():
+            try:
+                if self.query_one(f"#artist-chk-{_gid}", Checkbox).value:
+                    ext_filter.update("." + e for e in _exts)
+            except Exception:
+                pass
+        try:
+            _custom_val = self.query_one("#artist-ext-custom", Input).value.strip()
+            if _custom_val:
+                ext_filter.update(_parse_ext_filter(_custom_val))
+        except Exception:
+            pass
 
         # Respetar max_workers del template más restrictivo en el perfil
         for pu in profile.get("urls", []):
@@ -1783,34 +2441,59 @@ class ArtistScreen(Screen):
                 local_hashes = await _build_local_hash_map(folder)
 
                 # ── Fase 1: scan o retomar pendientes ─────────────────────
-                # Si ya hay archivos pendientes de una sesión anterior (p.ej.
-                # el proceso se interrumpió a mitad de descarga), se retoman
-                # directamente sin re-escanear la API del servidor.
                 import json as _json
+                import zlib as _zlib
                 pu_id: int | None = pu.get("id")
+
+                # Limpiar entradas que ya están en el catálogo (descargadas
+                # en sesiones anteriores pero no removidas de la cola).
+                _cleaned = await clean_pending_catalog_overlap(folder, pu_id)
+                if _cleaned:
+                    self._log(f"  [dim]⊘ {_cleaned} entrada(s) ya descargadas eliminadas de la cola[/]")
+
                 existing_pending = await pending_count(folder, pu_id)
+
+                # Detectar si el filtro cambió desde el último scan.
+                _filter_key  = f"scan_filter_{pu_id}"
+                _filter_sig  = _zlib.crc32(
+                    ",".join(sorted(ext_filter)).encode()
+                ) & 0x7FFFFFFF
+                _stored_sig  = await get_meta_int(folder, _filter_key)
+                _filter_changed = (_stored_sig != _filter_sig)
+
+                # Contar cuántos pendientes coinciden con el filtro actual.
+                # Si hay pendientes pero ninguno coincide → también hay que escanear
+                # (puede haber archivos del tipo nuevo que nunca se añadieron a la cola).
+                _matching_pending = await pending_count(
+                    folder, pu_id, ext_filter=ext_filter or None
+                )
+
                 new_this_scan = 0
 
-                if existing_pending > 0:
+                if existing_pending > 0 and not _filter_changed and _matching_pending > 0:
                     self._log(
                         f"  [cyan]↺ Retomando — "
-                        f"{existing_pending} archivo(s) pendiente(s)[/]"
+                        f"{_matching_pending} archivo(s) pendiente(s)[/]"
                     )
                 else:
                     # Scan de la API: poblar pending_queue antes de descargar.
-                    # El delay entre páginas (scan_page_delay) evita el burst
-                    # que activa las protecciones del servidor.
-                    self._log(f"  [dim]Escaneando posts…[/]")
+                    # Cuando el filtro cambió, se ignora url_since aunque exista:
+                    # los nuevos tipos de archivo pueden estar en posts anteriores
+                    # que ya pasaron la frontera de last_synced.
+                    if _filter_changed:
+                        _scan_since = None  # scan completo al cambiar filtro
+                        _label = "Filtro cambiado — escaneo completo para nuevos tipos…"
+                        self._log(f"  [dim]{_label}[/]")
+                    else:
+                        _scan_since = url_since
+                        self._log(f"  [dim]Escaneando posts…[/]")
                     seen_scan: set[str] = set()
+                    _scan_files_seen = 0
                     try:
                         async for fi in template.iter_files(
-                            artist_info, since=url_since
+                            artist_info, since=_scan_since
                         ):
-                            if not _passes_ext_filter(
-                                fi.filename, ext_filter, not ext_filter
-                            ):
-                                skipped_ref[0] += 1
-                                continue
+                            _scan_files_seen += 1
                             key = fi.dedup_key
                             if key in seen_scan:
                                 continue
@@ -1823,6 +2506,8 @@ class ArtistScreen(Screen):
                             ):
                                 continue
                             # Agregar a cola persistente si no está ya
+                            # (el filtro se aplica en el producer, no aquí,
+                            #  para que la cola refleje TODO lo pendiente)
                             if not await pending_url_exists(folder, key):
                                 await add_pending(
                                     folder,
@@ -1854,6 +2539,12 @@ class ArtistScreen(Screen):
                             "[yellow]⚠ Scan parcial — usa Sync para continuar.[/]"
                         )
 
+                    # Guardar fingerprint solo si la API devolvió archivos.
+                    # Si devolvió 0 puede ser un bloqueo transitorio (DDoS-Guard,
+                    # sesión expirada…) — no marcar como "escaneado" para que el
+                    # siguiente intento vuelva a escanear completo.
+                    if _scan_files_seen > 0:
+                        await set_meta_int(folder, _filter_key, _filter_sig)
                     self._log(f"  [dim]Scan: {new_this_scan} nuevo(s) en cola[/]")
 
                     # Enfriamiento post-scan: si el scan fue agresivo (muchas
@@ -1922,10 +2613,17 @@ class ArtistScreen(Screen):
                 file_queue: asyncio.Queue = asyncio.Queue(maxsize=workers * 3)
 
                 async def producer() -> None:
-                    """Alimenta la cola de workers desde la lista de pendientes."""
+                    """Alimenta la cola de workers desde la lista de pendientes.
+                    Aplica ext_filter aquí: los archivos que no coinciden se
+                    dejan en pending_queue para sesiones futuras con otro filtro."""
                     from ..templates.base import FileInfo as _FI
                     try:
                         for _pf in pending_list:
+                            # Filtro de extensiones: saltar sin eliminar de la cola
+                            if ext_filter and not _passes_ext_filter(
+                                _pf.get("filename_hint") or "", ext_filter, not ext_filter
+                            ):
+                                continue
                             _extra: dict = {}
                             if _pf.get("extra_headers"):
                                 try:
@@ -2090,7 +2788,7 @@ class ArtistScreen(Screen):
                                 old_path = local_hashes[result.file_hash]
                                 new_path = folder / final_name
                                 try:
-                                    old_path.rename(new_path)
+                                    old_path.replace(new_path)
                                     local_hashes[result.file_hash] = new_path
                                     if result.dest and result.dest.exists():
                                         result.dest.unlink()
@@ -2251,7 +2949,7 @@ class ArtistScreen(Screen):
                         final_name = build_filename(a_info.name, counter, file_info.filename)
                         if result.dest and result.dest.exists():
                             try:
-                                result.dest.rename(dest_folder / final_name)
+                                result.dest.replace(dest_folder / final_name)
                             except OSError:
                                 final_name = _tmp_name   # fallback
                         await add_file(
@@ -2619,6 +3317,74 @@ class ArtistScreen(Screen):
         self._set_semaphore("done")
 
 
+# ── ProfileFilterModal ───────────────────────────────────────────────────────
+
+class ProfileFilterModal(ModalScreen):
+    """
+    Modal para configurar el filtro de tipos de archivo de un perfil específico.
+    Se usa en el flujo de batch con 'usar configuración de cada perfil'.
+    Devuelve el JSON encoded del filtro seleccionado, o None si se cancela.
+    """
+
+    def __init__(self, profile_name: str, current_filter: str = "", **kwargs):
+        super().__init__(**kwargs)
+        self._profile_name   = profile_name
+        self._current_filter = current_filter
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="pfm-container"):
+            yield Label(
+                f"Configurar filtro para: [bold]{self._profile_name}[/]",
+                id="pfm-title", markup=True,
+            )
+            yield Label("Tipos de archivo a descargar (vacío = todos):", classes="batch-filter-title")
+            with Horizontal(id="pfm-groups"):
+                for group_id, (label, _exts) in EXT_GROUPS.items():
+                    yield Checkbox(label, value=False, id=f"pfm-chk-{group_id}")
+            with Horizontal(id="pfm-custom-row"):
+                yield Label("Ext. extra:", classes="batch-cfg-label")
+                yield Input(
+                    "", id="pfm-custom",
+                    placeholder="psd,clip  (separadas por coma)",
+                    classes="batch-cfg-ext",
+                )
+            with Horizontal(id="pfm-buttons"):
+                yield Button("Aceptar", id="pfm-ok",     variant="success")
+                yield Button("Omitir",  id="pfm-skip",   variant="default")
+                yield Button("Cancelar", id="pfm-cancel", variant="error")
+
+    def on_mount(self) -> None:
+        # Restaurar selección actual del perfil
+        if self._current_filter:
+            _group_ids, _ = _decode_profile_filter(self._current_filter)
+            for _gid in _group_ids:
+                try:
+                    self.query_one(f"#pfm-chk-{_gid}", Checkbox).value = True
+                except Exception:
+                    pass
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        match event.button.id:
+            case "pfm-ok":
+                selected: list[str] = []
+                for _gid in EXT_GROUPS:
+                    try:
+                        if self.query_one(f"#pfm-chk-{_gid}", Checkbox).value:
+                            selected.append(_gid)
+                    except Exception:
+                        pass
+                try:
+                    custom = self.query_one("#pfm-custom", Input).value.strip()
+                except Exception:
+                    custom = ""
+                self.dismiss(_encode_profile_filter(selected, custom))
+            case "pfm-skip":
+                # Omitir sin cambiar configuración → None significa "no configurado"
+                self.dismiss(None)
+            case "pfm-cancel":
+                self.dismiss(False)  # False = cancelar todo el batch
+
+
 # ── BatchScreen ─────────────────────────────────────────────────────────────
 
 class BatchScreen(Screen):
@@ -2664,7 +3430,13 @@ class BatchScreen(Screen):
                     yield Input("3", id="inp-batch-workers", classes="batch-cfg-input")
                     yield Button("▶ Iniciar", id="btn-batch-start", variant="success")
 
-                yield Label("Tipos de archivo a descargar (vacío = todos):", classes="batch-filter-title")
+                with Horizontal(id="batch-filter-mode"):
+                    yield Checkbox(
+                        "Usar configuración de cada perfil",
+                        value=False, id="chk-use-profile-filter",
+                    )
+
+                yield Label("Tipos de archivo a descargar (vacío = todos):", classes="batch-filter-title", id="batch-filter-title")
                 with Horizontal(id="batch-filter-groups"):
                     for group_id, (label, _exts) in EXT_GROUPS.items():
                         yield Checkbox(label, value=False, id=f"chk-{group_id}")
@@ -2697,6 +3469,16 @@ class BatchScreen(Screen):
             self.query_one("#inp-batch-workers", Input).value = str(cfg.workers)
         except Exception:
             pass
+
+    def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
+        """Toggle visibilidad de checkboxes de grupo cuando se activa 'usar perfil'."""
+        if event.checkbox.id == "chk-use-profile-filter":
+            use_profile = event.value
+            for widget_id in ("#batch-filter-title", "#batch-filter-groups", "#batch-filter-custom"):
+                try:
+                    self.query_one(widget_id).display = not use_profile
+                except Exception:
+                    pass
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         match event.button.id:
@@ -2733,26 +3515,30 @@ class BatchScreen(Screen):
         except (ValueError, Exception):
             batch_workers = 3
 
-        # Recopilar extensiones de los grupos marcados
-        include_exts: set[str] = set()
-        for group_id, (_label, exts) in EXT_GROUPS.items():
-            try:
-                if self.query_one(f"#chk-{group_id}", Checkbox).value:
-                    include_exts.update("." + ext for ext in exts)
-            except Exception:
-                pass
-
-        # Agregar extensiones custom
+        # ¿Modo "usar configuración de cada perfil"?
+        use_profile_filter = False
         try:
-            raw_custom = self.query_one("#inp-batch-custom", Input).value.strip()
+            use_profile_filter = self.query_one("#chk-use-profile-filter", Checkbox).value
         except Exception:
-            raw_custom = ""
-        include_exts.update(_parse_ext_filter(raw_custom))
+            pass
 
-        # include_exts vacío = sin filtro (descargar todo)
-        # include_exts con contenido = modo include (solo esos tipos)
-        ext_filter = include_exts
-        exclude_mode = False  # modo include: descargar solo los tipos seleccionados
+        ext_filter   = set()
+        exclude_mode = False
+
+        if not use_profile_filter:
+            # Recopilar extensiones de los grupos marcados
+            for group_id, (_label, exts) in EXT_GROUPS.items():
+                try:
+                    if self.query_one(f"#chk-{group_id}", Checkbox).value:
+                        ext_filter.update("." + ext for ext in exts)
+                except Exception:
+                    pass
+            # Extensiones custom
+            try:
+                raw_custom = self.query_one("#inp-batch-custom", Input).value.strip()
+            except Exception:
+                raw_custom = ""
+            ext_filter.update(_parse_ext_filter(raw_custom))
 
         # Ocultar config, activar botones Stop y Skip
         try:
@@ -2766,14 +3552,79 @@ class BatchScreen(Screen):
                 pass
 
         self._stop_requested = False
-        self.run_worker(
-            self._do_batch(batch_workers, ext_filter, exclude_mode),
-            exclusive=True, group="batch",
-            exit_on_error=False,
-        )
+
+        if use_profile_filter:
+            # Configurar perfiles sin filtro antes de arrancar
+            self.run_worker(
+                self._configure_and_start_batch(batch_workers),
+                exclusive=True, group="batch",
+                exit_on_error=False,
+            )
+        else:
+            self.run_worker(
+                self._do_batch(batch_workers, ext_filter, exclude_mode),
+                exclusive=True, group="batch",
+                exit_on_error=False,
+            )
 
     def action_go_back(self) -> None:
         self.app.pop_screen()
+
+    async def _configure_and_start_batch(self, batch_workers: int) -> None:
+        """
+        Pre-vuelo del modo 'usar configuración de cada perfil':
+        1. Carga todos los perfiles.
+        2. Para los que no tienen ext_filter configurado → muestra ProfileFilterModal.
+        3. Guarda la configuración y arranca _do_batch con use_profile_filter=True.
+        """
+        _slim    = await list_profiles(INDEX_DB)
+        profiles = []
+        for _p in _slim:
+            _full = await get_profile(INDEX_DB, _p["id"])
+            if _full:
+                profiles.append(_full)
+
+        unconfigured = [
+            p for p in profiles
+            if not p.get("ext_filter")
+            and any(u.get("enabled") and u.get("url") for u in p.get("urls", []))
+        ]
+
+        if unconfigured:
+            self._log(
+                f"[yellow]⚠ {len(unconfigured)} perfil(es) sin configuración de filtro.[/]\n"
+                f"[dim]Configura cada uno antes de iniciar el batch.[/]"
+            )
+
+        for profile in unconfigured:
+            if self._stop_requested:
+                return
+            result = await self.app.push_screen_wait(
+                ProfileFilterModal(
+                    profile_name   = profile["display_name"],
+                    current_filter = profile.get("ext_filter", ""),
+                )
+            )
+            if result is False:
+                # Usuario canceló todo el batch
+                self._log("[red]Batch cancelado por el usuario.[/]")
+                try:
+                    self.query_one("#btn-batch-stop", Button).disabled = True
+                    self.query_one("#btn-batch-skip", Button).disabled = True
+                    self.query_one("#batch-config").display = True
+                except Exception:
+                    pass
+                return
+            if result is None:
+                # Omitir este perfil → no guardar nada, continuará con filtro vacío
+                self._log(f"  [dim]⊘ {profile['display_name']} — omitido (descargará todo)[/]")
+                continue
+            # Guardar configuración
+            await update_profile_ext_filter(INDEX_DB, profile["id"], result)
+            self._log(f"  [green]✓ {profile['display_name']} — filtro configurado[/]")
+
+        self._log("\n[bold]Iniciando batch con configuración de perfiles…[/]\n")
+        await self._do_batch(batch_workers, use_profile_filter=True)
 
     # ── UI helpers ───────────────────────────────────────────────────────────
 
@@ -2804,21 +3655,18 @@ class BatchScreen(Screen):
 
     async def _scan_url(
         self, pu: dict, folder: Path, engine,
-        ext_filter: set | None = None,
-        exclude_mode: bool = True,
     ) -> int:
         """
-        Escanea una URL de perfil y puebla pending_queue.
+        Escanea una URL de perfil y puebla pending_queue con TODOS los archivos
+        pendientes (sin filtrar por extensión — el filtro se aplica en _download_url).
         Si ya hay pendientes (sesión interrumpida), los retoma sin re-escanear.
-        Retorna el número de archivos nuevos en cola.
-        ext_filter / exclude_mode — idénticos a _passes_ext_filter.
+        Retorna el número de archivos en cola (nuevos o existentes).
         """
         import json as _json
         from ..auth.patreon        import NeedsManualAuth
         from ..auth.pixiv          import NeedsPixivAuth
         from ..templates._registry import get_template
         from ..templates.base      import parse_date_utc
-        from ..gui.bridge          import _passes_ext_filter
 
         pu_id = pu.get("id")
 
@@ -2860,11 +3708,8 @@ class BatchScreen(Screen):
                     continue
                 if fi.remote_hash and await hash_exists(folder, fi.remote_hash):
                     continue
-                # Filtro global de extensiones del batch
-                if ext_filter and not _passes_ext_filter(
-                    fi.filename, ext_filter, exclude_mode
-                ):
-                    continue
+                # Sin filtro de extensiones: la cola siempre refleja TODO lo pendiente.
+                # El filtro se aplica en _download_url al momento de descargar.
                 if not await pending_url_exists(folder, key):
                     await add_pending(
                         folder,
@@ -2940,15 +3785,11 @@ class BatchScreen(Screen):
                 except Exception:
                     pass
 
-            # Filtro de extensiones — captura ítems añadidos sin filtro activo
+            # Filtro de extensiones: saltar sin eliminar de pending_queue.
+            # El archivo queda en cola para futuras sesiones con otro filtro.
             if ext_filter and not _passes_ext_filter(
                 filename_hint, ext_filter, exclude_mode
             ):
-                await remove_pending(folder, url_source)
-                sk += 1
-                done_count += 1
-                self._set_progress(done_count, progress_total)
-                self._log(f"  [dim]⊘ {filename_hint[:55]}  [excluido por filtro][/]")
                 continue
 
             # Dedup rápido antes de descargar (no resetea consecutive_errors)
@@ -3147,19 +3988,19 @@ class BatchScreen(Screen):
             if result.file_hash in local_hashes:
                 old_path = local_hashes[result.file_hash]
                 try:
-                    old_path.rename(folder / final_name)
+                    old_path.replace(folder / final_name)
                     local_hashes[result.file_hash] = folder / final_name
                     if result.dest and result.dest.exists():
                         result.dest.unlink()
                 except OSError:
                     try:
-                        result.dest.rename(folder / final_name)
+                        result.dest.replace(folder / final_name)
                     except OSError:
                         final_name = _tmp_name
                     local_hashes[result.file_hash] = folder / final_name
             else:
                 try:
-                    result.dest.rename(folder / final_name)
+                    result.dest.replace(folder / final_name)
                     local_hashes[result.file_hash] = folder / final_name
                 except OSError:
                     final_name = _tmp_name
@@ -3190,14 +4031,16 @@ class BatchScreen(Screen):
         batch_workers: int = 1,
         ext_filter: set | None = None,
         exclude_mode: bool = True,
+        use_profile_filter: bool = False,
     ) -> None:
         """
         Loop principal del batch:
           - Itera todos los perfiles, escanea y descarga cada uno.
           - Los incompletos se reintentan en la siguiente iteración.
           - Para cuando no quedan incompletos o el usuario detiene el proceso.
-        batch_workers — descargas concurrentes por perfil.
-        ext_filter    — set de extensiones para filtrar (excluir o incluir).
+        batch_workers      — descargas concurrentes por perfil.
+        ext_filter         — set de extensiones global (excluir o incluir).
+        use_profile_filter — si True, usa la configuración guardada de cada perfil.
         """
         from ..engine     import DownloadEngine
         from ..gui.bridge import _build_local_hash_map
@@ -3270,6 +4113,20 @@ class BatchScreen(Screen):
                             len(enabled),
                         )
 
+                        # Determinar ext_filter efectivo para este perfil
+                        if use_profile_filter:
+                            _stored = profile.get("ext_filter", "")
+                            _gids, eff_ext_filter = _decode_profile_filter(_stored)
+                            eff_exclude_mode = False
+                            if eff_ext_filter:
+                                _gnames = [EXT_GROUPS[g][0] for g in _gids if g in EXT_GROUPS]
+                                self._log(
+                                    f"  [dim]filtro: {', '.join(_gnames) or 'custom'}[/]"
+                                )
+                        else:
+                            eff_ext_filter   = ext_filter or set()
+                            eff_exclude_mode = exclude_mode
+
                         # ── Fase 1: scan si pending_queue vacía ────────────
                         total_pending = 0
                         for pu in profile.get("urls", []):
@@ -3285,11 +4142,7 @@ class BatchScreen(Screen):
                                     continue
                                 if self._stop_requested:
                                     break
-                                new_n = await self._scan_url(
-                                    pu, folder, engine,
-                                    ext_filter=ext_filter or set(),
-                                    exclude_mode=exclude_mode,
-                                )
+                                new_n = await self._scan_url(pu, folder, engine)
                                 if new_n > 0:
                                     site = pu.get("site", "?")
                                     self._log(
@@ -3325,8 +4178,8 @@ class BatchScreen(Screen):
                                 name, pu, folder, engine, local_hashes,
                                 progress_offset, total_pending,
                                 batch_workers=batch_workers,
-                                ext_filter=ext_filter or set(),
-                                exclude_mode=exclude_mode,
+                                ext_filter=eff_ext_filter,
+                                exclude_mode=eff_exclude_mode,
                             )
                             dl_total        += dl
                             sk_total        += sk
