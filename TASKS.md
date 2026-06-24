@@ -2,10 +2,23 @@
 
 ## ← RETOMAR AQUÍ (handoff 2026-06-24 — fin sesión 3)
 
-**EMPEZAR POR: Fase 3, Paso 6** — `batch_view` (descarga por lotes multi-perfil sobre el servicio).
-Pasos 2-5 hechos. ⚠ El login Patreon de la GUI (`_resolve_auth`) NO se pudo probar headless
-(necesita navegador real + David); validar interactivamente al abrir la GUI. Pasos 2-5
-commiteados; hasta cc8dc8c en origin (Pasos 4-5 pendientes push).
+**EMPEZAR POR: tres refinamientos pedidos por David (prioridad: login) tras probar la GUI:**
+1. **Login Patreon (HECHO, falta prueba en vivo)** — chequeo proactivo: si el perfil baja de
+   Patreon y no hay sesión (`load_patreon_cookies()`), popup en contexto "Iniciar sesión / Cancelar"
+   antes de descargar (no bajar lo público en silencio). `_run_patreon_login` abre el navegador
+   (login guiado) con progreso al log. Cerrar/ver sesión en Ajustes (sección "Cuenta de Patreon").
+   `_resolve_auth` queda como fallback si la sesión expira a mitad. ⚠ El login guiado real (nodriver
+   abre Brave) NO se pudo probar headless — David debe validarlo en vivo. Lógica del gate sí testeada.
+2. **Feedback de escaneo (PENDIENTE)** — el servicio casi no emite eventos en Fase 1; la GUI parece
+   congelada durante el scan aunque el disco trabaje. Agregar progreso de scan en vivo (evento
+   `ScanProgress` cada N posts → log/status). Visto en vivo con RuiDX (cola creció +97 en 6s sin
+   feedback en la GUI).
+3. **Filtro por tipos (PENDIENTE)** — hoy la GUI pide extensiones a mano (tedioso, error fastidia
+   la descarga). Portar los checkboxes de `EXT_GROUPS` (ya en `downloads.py`) a `artist_detail_view`
+   y al wizard, con `_encode/_decode_profile_filter`.
+
+Luego seguir con Fase 3 Paso 6 (`batch_view`). Pasos 2-5 commiteados; hasta cc8dc8c en origin
+(Paso 4, 5 y login pendientes push). Nota: `run.bat`/`run.sh` ya abren la GUI por defecto (era TUI).
 
 Contexto rápido: el servicio de descarga `cherry_dl/download_service.py` ya existe, está
 **validado headless con BadSpider** y es la base de la GUI. La GUI será la UI oficial; la TUI se

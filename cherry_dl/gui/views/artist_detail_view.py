@@ -762,6 +762,17 @@ class ArtistDetailView(QWidget):
         self._log.clear()
         self._lbl_status.setText("Iniciando descarga\u2026")
 
+        # Chequeo proactivo de sesi\u00f3n Patreon: si el perfil baja de Patreon y
+        # no hay sesi\u00f3n, ofrecer login en contexto (no bajar lo p\u00fablico en
+        # silencio). Si el usuario cancela, abortar la descarga.
+        if not await self._ensure_patreon_login_if_needed():
+            self._append_log("\u2717 Descarga cancelada \u2014 se requiere sesi\u00f3n de Patreon.")
+            self._lbl_status.setText("Descarga cancelada \u2014 sin sesi\u00f3n de Patreon.")
+            self._set_status_light("idle")
+            self._download_task = None
+            self._set_busy(False)
+            return
+
         from ...download_service import run_profile_download
 
         workers = self._workers_spin.value()
@@ -837,46 +848,73 @@ class ArtistDetailView(QWidget):
         # SourceStarted / Cooldown / BatchInfo / ScanComplete -> ya cubiertos
         # por los eventos Log que el servicio emite junto a ellos.
 
-    async def _resolve_auth(self, site: str) -> bool:
-        """Resuelve autenticación interactiva cuando el servicio la pide.
+    async def _ensure_patreon_login_if_needed(self) -> bool:
+        """Antes de descargar de Patreon sin sesión, ofrece login en contexto.
 
-        El servicio llama esto si una fuente lanza NeedsManualAuth (sin sesión
-        y el login automático no prosperó). Devolver True permite reintentar.
+        Devuelve True si se puede proceder (hay sesión, no es Patreon, o el
+        login tuvo éxito); False si el usuario cancela o el login falla. El
+        popup solo aparece cuando hace falta — no se esconde en Ajustes.
         """
-        if site != "patreon":
-            self._append_log(f"  ✗ Auth de {site} no soportada en la GUI todavía")
-            return False
+        if not self._profile:
+            return True
+        has_patreon = any(
+            u.get("enabled") and u.get("url") and u.get("site") == "patreon"
+            for u in self._profile["urls"]
+        )
+        if not has_patreon:
+            return True
 
-        from ...auth.patreon import NeedsManualAuth, ensure_patreon_session
+        from ...auth.patreon import load_patreon_cookies
+        if load_patreon_cookies():
+            return True  # ya hay sesión guardada
 
         reply = QMessageBox.question(
             self,
             "Sesión de Patreon requerida",
-            "No hay sesión activa de Patreon.\n\n"
-            "¿Abrir el navegador para iniciar sesión? Inicia sesión en la "
-            "ventana que se abra; cherry-dl capturará la sesión automáticamente.",
+            "Este perfil descarga de Patreon, pero no hay una sesión activa.\n\n"
+            "Sin iniciar sesión solo se descargaría el contenido público "
+            "(gratuito).\n\n"
+            "¿Iniciar sesión ahora? Se abrirá el navegador para que ingreses "
+            "a tu cuenta de Patreon.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Yes,
         )
         if reply != QMessageBox.StandardButton.Yes:
-            self._append_log("  ✗ Login de Patreon cancelado por el usuario")
             return False
+        return await self._run_patreon_login()
 
-        self._append_log("  ⟳ Abriendo navegador para login de Patreon…")
+    async def _run_patreon_login(self) -> bool:
+        """Ejecuta el login guiado de Patreon (abre el navegador) con progreso.
+
+        Compartido por el chequeo proactivo y por `_resolve_auth` (fallback
+        cuando la sesión expira a mitad de descarga).
+        """
+        from ...auth.patreon import guided_login_patreon
+
+        self._append_log("⟳ Abriendo el navegador para iniciar sesión en Patreon…")
+        self._lbl_status.setText("Esperando login de Patreon en el navegador…")
         try:
-            cookies = await ensure_patreon_session(
-                allow_guided=True,
+            cookies = await guided_login_patreon(
                 on_status=lambda m: self._append_log(f"    {m}"),
             )
-            if cookies.get("session_id"):
-                self._append_log("  ✓ Sesión de Patreon obtenida")
-                return True
-            self._append_log("  ✗ Login sin session_id")
-        except NeedsManualAuth as exc:
-            self._append_log(f"  ✗ {exc}")
         except Exception as exc:
-            self._append_log(f"  ✗ Error en login: {exc}")
+            self._append_log(f"✗ Error en el login de Patreon: {exc}")
+            return False
+        if cookies and cookies.get("session_id"):
+            self._append_log("✓ Sesión de Patreon iniciada y guardada.")
+            return True
+        self._append_log("✗ Login incompleto — no se capturó la sesión.")
         return False
+
+    async def _resolve_auth(self, site: str) -> bool:
+        """Fallback reactivo: el servicio lo llama si una fuente lanza
+        NeedsManualAuth a mitad de descarga (p. ej. sesión expirada/rechazada).
+        """
+        if site != "patreon":
+            self._append_log(f"  ✗ Auth de {site} no soportada en la GUI todavía")
+            return False
+        self._append_log("  ⚠ La sesión de Patreon expiró o fue rechazada.")
+        return await self._run_patreon_login()
 
     async def _do_deduplicate(self) -> None:
         """

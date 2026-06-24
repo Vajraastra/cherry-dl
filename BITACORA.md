@@ -23,6 +23,25 @@ ahora llama a `run_profile_download(...)` y traduce los eventos tipados a widget
 - `exclude_mode=False` (la UI de filtro de la GUI es solo-incluir). `resolve_auth=None` por ahora
   → si falta sesión Patreon, el servicio loguea "auth cancelada" y salta la fuente (pendiente Paso 5).
 
+### Login Patreon en la GUI — chequeo proactivo + login/logout (post-prueba de David)
+Probando la GUI en vivo, David vio que al descargar de Patreon NO saltaba el login y la descarga
+bajaba (probablemente) solo contenido público en silencio. Diagnóstico: `get_artist_info` resuelve
+la campaña con datos públicos sin lanzar `NeedsManualAuth`, así que la auth perezosa nunca forzaba
+login. Además, en Windows las cookies del navegador no se auto-leen (App-Bound) y `run.bat` abría la
+TUI por error (corregido: ahora `run.sh` lanza `gui` por defecto; TUI vía `run.bat tui`).
+
+Decisión de diseño (David): el login NO se esconde en Ajustes (usuarios no se enterarían) — popup
+**en contexto** solo al descargar de Patreon sin sesión; cerrar sesión sí en Ajustes.
+- `artist_detail_view._ensure_patreon_login_if_needed()`: antes de `run_profile_download`, si hay
+  fuente Patreon activa y `load_patreon_cookies()` es None → `QMessageBox` "Iniciar sesión / Cancelar".
+  Cancelar aborta la descarga (no baja lo público en silencio).
+- `_run_patreon_login()`: login guiado compartido (`guided_login_patreon` → abre el navegador) con
+  status al log. Reusado por `_resolve_auth` (fallback si la sesión expira a mitad de descarga).
+- `settings_view`: sección "Cuenta de Patreon" — estado (Conectado/No conectado), "Iniciar sesión"
+  (login guiado) y "Cerrar sesión" (`clear_patreon_session`).
+- Lógica del gate testeada headless (4 casos). E2e de descarga sigue verde (mock de sesión para no
+  colgar el popup). ⚠ El login guiado real (nodriver abre Brave) requiere validación interactiva.
+
 ### Paso 5 — fix estructura de carpetas + resolve_auth en la GUI
 **(a) Estructura de carpetas plana.** `cherry_dl.profiles.create_profile` (y el preview del wizard)
 construían el `folder_path` como `{download_dir}/{site}/{nombre}` — estructura VIEJA. Pero

@@ -12,6 +12,7 @@ de inmediato (las vistas que usen load_config() recogerán los valores).
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Callable
 
@@ -192,6 +193,42 @@ class SettingsView(QWidget):
         sep2.setFrameShape(QFrame.Shape.HLine)
         root.addWidget(sep2)
 
+        # ── CUENTA DE PATREON ──────────────────────────────────────────────
+        lbl_acc = QLabel("CUENTA DE PATREON")
+        lbl_acc.setObjectName("lbl_section")
+        root.addWidget(lbl_acc)
+
+        lbl_acc_hint = QLabel(
+            "El inicio de sesión se ofrece automáticamente al descargar de "
+            "Patreon sin sesión. Aquí puedes ver el estado y cerrar sesión."
+        )
+        lbl_acc_hint.setObjectName("lbl_status")
+        lbl_acc_hint.setWordWrap(True)
+        root.addWidget(lbl_acc_hint)
+
+        acc_row = QHBoxLayout()
+        acc_row.setSpacing(8)
+        self._lbl_patreon_status = QLabel("—")
+        self._lbl_patreon_status.setObjectName("lbl_subtitle")
+        self._btn_patreon_login = QPushButton("Iniciar sesión")
+        self._btn_patreon_login.setMinimumWidth(120)
+        self._btn_patreon_logout = QPushButton("Cerrar sesión")
+        self._btn_patreon_logout.setObjectName("btn_danger")
+        self._btn_patreon_logout.setMinimumWidth(120)
+        acc_row.addWidget(self._lbl_patreon_status)
+        acc_row.addStretch()
+        acc_row.addWidget(self._btn_patreon_login)
+        acc_row.addWidget(self._btn_patreon_logout)
+        root.addLayout(acc_row)
+
+        self._btn_patreon_login.clicked.connect(self._on_patreon_login)
+        self._btn_patreon_logout.clicked.connect(self._on_patreon_logout)
+
+        sep3 = QFrame()
+        sep3.setObjectName("separator")
+        sep3.setFrameShape(QFrame.Shape.HLine)
+        root.addWidget(sep3)
+
         # ── INFO ───────────────────────────────────────────────────────────
         lbl_info = QLabel("INFORMACIÓN DEL SISTEMA")
         lbl_info.setObjectName("lbl_section")
@@ -260,6 +297,47 @@ class SettingsView(QWidget):
         self._retries_file.setValue(cfg.network.retries_file)
         self._stall_timeout.setValue(cfg.network.stall_timeout)
         self._lbl_status.setText("")
+        self._refresh_patreon_status()
+
+    # ── Cuenta de Patreon ────────────────────────────────────────────────────
+
+    def _refresh_patreon_status(self) -> None:
+        from ...auth.patreon import load_patreon_cookies
+        connected = bool(load_patreon_cookies())
+        if connected:
+            self._lbl_patreon_status.setText("●  Conectado")
+            self._lbl_patreon_status.setStyleSheet("color: #3a9d3a;")
+        else:
+            self._lbl_patreon_status.setText("●  No conectado")
+            self._lbl_patreon_status.setStyleSheet("color: #808080;")
+        self._btn_patreon_logout.setEnabled(connected)
+
+    def _on_patreon_login(self) -> None:
+        self._btn_patreon_login.setEnabled(False)
+        task = asyncio.ensure_future(self._do_patreon_login())
+        task.add_done_callback(lambda _t: self._btn_patreon_login.setEnabled(True))
+
+    async def _do_patreon_login(self) -> None:
+        from ...auth.patreon import guided_login_patreon
+        self._lbl_status.setText("Abriendo el navegador para iniciar sesión…")
+        try:
+            cookies = await guided_login_patreon(
+                on_status=lambda m: self._lbl_status.setText(m),
+            )
+            if cookies and cookies.get("session_id"):
+                self._lbl_status.setText("Sesión de Patreon iniciada.")
+            else:
+                self._lbl_status.setText("Login incompleto — no se capturó la sesión.")
+        except Exception as exc:
+            self._lbl_status.setText(f"Error en el login: {exc}")
+        finally:
+            self._refresh_patreon_status()
+
+    def _on_patreon_logout(self) -> None:
+        from ...auth.patreon import clear_patreon_session
+        clear_patreon_session()
+        self._lbl_status.setText("Sesión de Patreon cerrada.")
+        self._refresh_patreon_status()
 
     # ── Slots ──────────────────────────────────────────────────────────────
 
