@@ -2,9 +2,11 @@
 
 ## ← RETOMAR AQUÍ (handoff 2026-06-24 — fin sesión 3)
 
-**EMPEZAR POR: Fase 3, Paso 3** — cablear `artist_detail_view` al servicio
-`download_service.py` (handler de eventos tipados). Paso 2 (mover `EXT_GROUPS`) ya hecho.
-Hasta el commit 3e70eb2 pusheado; Paso 2 commiteado localmente, pendiente push.
+**EMPEZAR POR: Fase 3, Paso 4** — `profiles_view` + columna Estado (pending_count por perfil).
+Pasos 2 y 3 hechos. ⚠ PENDIENTE PRUEBA e2e en GUI real: `artist_detail_view` ya delega en el
+servicio pero falta abrir la GUI y descargar de verdad (el servicio está validado headless, no
+en Qt/qasync). `resolve_auth` aún sin cablear → si falta sesión Patreon, loguea "auth cancelada".
+Commits 8ae7e80 (Paso 2) + Paso 3 locales, pendiente push.
 
 Contexto rápido: el servicio de descarga `cherry_dl/download_service.py` ya existe, está
 **validado headless con BadSpider** y es la base de la GUI. La GUI será la UI oficial; la TUI se
@@ -45,7 +47,12 @@ veredicto por archivo en BITACORA. Backend compartido es sólido; la TUI es la s
         solo en terminación normal, no en cancelación. (Latente también en la TUI; no se toca → deprecará.)
   - [x] **Paso 2** — `EXT_GROUPS` movido de `tui/app.py` a `downloads.py` (canónico, compartido
         servicio/GUI). `tui/app.py` y `tests/test_ext_groups.py` reimportan. 18/18 tests OK.
-  - [ ] Paso 3 — `artist_detail_view` delega en el servicio (handler de eventos).
+  - [x] **Paso 3** — `artist_detail_view` delega en el servicio. `_do_download` 520→50 líneas;
+        nuevo `_on_service_event` traduce eventos tipados → widgets. Throttle 4 Hz en
+        `_worker_progress` (el servicio emite por chunk, no throttlea). Importa `_parse_ext_filter`
+        de `downloads`; eliminados `add_file`/`next_counter` (inline download borrado). `exclude_mode`
+        fijo en False (UI solo-incluir). `resolve_auth=None` por ahora. Import GUI OK + 18/18 tests.
+        ⚠ Falta prueba e2e en GUI real.
   - [ ] Paso 4 — `profiles_view` + columna Estado. Paso 5 — wizard fix. Paso 6 — batch_view.
         Paso 7 — duplicates_view. Paso 8 — lanzador GUI por defecto + deprecación TUI.
 - [ ] Bugs del legacy a corregir en el port: estructura de carpetas vieja en wizard (preview L279);

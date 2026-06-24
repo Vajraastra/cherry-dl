@@ -39,8 +39,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ...catalog import add_file, get_stats, hash_exists, init_catalog, next_counter, url_exists
+from ...catalog import get_stats, hash_exists, init_catalog, url_exists
 from ...config import INDEX_DB, load_config
+from ...downloads import _parse_ext_filter
 from ...index import (
     add_profile_url,
     get_profile,
@@ -486,6 +487,7 @@ class ArtistDetailView(QWidget):
                 "speed": lbl_speed,
                 "start_time": 0.0,
                 "bytes_done": 0,
+                "last_ui": 0.0,
             })
 
         # Ajustar altura del scroll area: muestra hasta _WORKER_MAX_VIS rows
@@ -500,6 +502,7 @@ class ArtistDetailView(QWidget):
         row = self._worker_rows[slot]
         row["start_time"] = time.monotonic()
         row["bytes_done"] = 0
+        row["last_ui"] = 0.0
         row["status"].setText("↓")
         row["file"].setText(filename[:55])
         row["bar"].setRange(0, 100)
@@ -510,8 +513,15 @@ class ArtistDetailView(QWidget):
         if slot >= len(self._worker_rows):
             return
         row = self._worker_rows[slot]
+        # Throttle a 4 Hz: el servicio emite WorkerProgress por cada chunk
+        # (~160/s/worker a 10 MB/s), lo que satura el event loop de qasync
+        # con operaciones Qt. Actualizamos los widgets como mucho cada 250 ms.
+        now = time.monotonic()
+        if now - row["last_ui"] < 0.25:
+            return
+        row["last_ui"] = now
         row["bytes_done"] = done
-        elapsed = time.monotonic() - row["start_time"]
+        elapsed = now - row["start_time"]
         if elapsed > 0.1:
             speed = done / elapsed
             row["speed"].setText(_fmt_speed(speed))
@@ -739,526 +749,91 @@ class ArtistDetailView(QWidget):
             self._set_busy(False)
 
     async def _do_download(self) -> None:
-        """Descarga todos los archivos nuevos de las fuentes activas."""
+        """Descarga delegando en el servicio compartido `download_service`.
+
+        Toda la logica de scan -> cola -> workers -> diferidos vive en el
+        servicio; esta vista solo traduce los eventos tipados a UI en
+        `_on_service_event`.
+        """
         if not self._profile:
             return
         self._set_busy(True)
         self._log.clear()
-        self._lbl_status.setText("Iniciando descarga…")
+        self._lbl_status.setText("Iniciando descarga\u2026")
 
-        # Contadores mutables accesibles desde closures anidadas
-        downloaded_ref = [0]
-        skipped_ref = [0]
-        errors_ref = [0]
-        deferred_count_ref = [0]
-        folder = Path(self._profile["folder_path"])
+        from ...download_service import run_profile_download
+
+        workers = self._workers_spin.value()
+        ext_filter = _parse_ext_filter(self._ext_filter.text())
+        # Panel inicial con los workers solicitados; el servicio puede reducir
+        # el numero (cap del template) y reemitir via WorkersResolved.
+        self._init_worker_slots(workers)
 
         try:
-            from ...engine import DownloadEngine, ErrorKind
-            from ...downloads import (
-                _build_local_hash_map,
-                _parse_ext_filter,
-                _passes_ext_filter,
-                build_filename,
+            summary = await run_profile_download(
+                self._profile,
+                workers=workers,
+                ext_filter=ext_filter,
+                exclude_mode=False,
+                emit=self._on_service_event,
             )
-            from ...index import (
-                get_or_create_artist,
-                get_or_create_site,
-                init_index,
-                update_profile_url_sync,
-            )
-            from ...templates._registry import get_template
-
-            config = load_config()
-            workers = self._workers_spin.value()
-            ext_filter = _parse_ext_filter(self._ext_filter.text())
-
-            # Inicializar panel de workers
-            self._init_worker_slots(workers)
-
-            # Cola diferida: archivos que fallaron con error temporal
-            deferred: list[tuple] = []
-
-            async with DownloadEngine(config, workers=workers) as engine:
-                for pu in self._profile["urls"]:
-                    if not pu["enabled"] or not pu["url"]:
-                        continue
-
-                    template = get_template(pu["url"], engine)
-                    if not template:
-                        self._append_log(
-                            f"✗ Sin template para: {pu['url']}"
-                        )
-                        continue
-
-                    artist_info = await template.get_artist_info(pu["url"])
-                    self._append_log(
-                        f"▶ {artist_info.name} ({pu['site']})"
-                    )
-
-                    folder.mkdir(parents=True, exist_ok=True)
-                    await init_catalog(folder)
-                    await init_index(INDEX_DB)
-                    site_id = await get_or_create_site(
-                        INDEX_DB, artist_info.site
-                    )
-                    await get_or_create_artist(
-                        db_path=INDEX_DB,
-                        site_id=site_id,
-                        artist_id=artist_info.artist_id,
-                        name=artist_info.name,
-                        folder_path=folder,
-                    )
-
-                    # Registrar artist_id en profile_url para que la
-                    # migración de init_index no cree una entrada duplicada
-                    # con url=NULL en la próxima ejecución.
-                    await update_profile_url_sync(
-                        INDEX_DB,
-                        pu["id"],
-                        artist_id=artist_info.artist_id,
-                    )
-
-                    # Snapshot del contador de descargas antes de esta fuente
-                    dl_before = downloaded_ref[0]
-
-                    local_hashes = await _build_local_hash_map(folder)
-                    file_queue: asyncio.Queue = asyncio.Queue(
-                        maxsize=workers * 3
-                    )
-
-                    # Sets de hashes/URLs ya encolados en esta sesión.
-                    # Evita la race condition donde el mismo archivo aparece
-                    # varias veces en la API antes de que el worker lo descargue
-                    # y lo añada al catálogo (ambas instancias pasarían el
-                    # hash_exists/url_exists del catálogo y se descargarían dos veces).
-                    # ── Repartidor ─────────────────────────────────────────
-                    # Única responsabilidad: garantizar que cada URL llega
-                    # a lo sumo una vez a la cola (dedup de API).
-                    # Las verificaciones de catálogo las hacen los workers.
-                    seen_urls: set[str] = set()
-
-                    async def producer() -> None:
-                        try:
-                            async for fi in template.iter_files(artist_info):
-                                # Filtro de extensión
-                                if not _passes_ext_filter(
-                                    fi.filename, ext_filter, not ext_filter
-                                ):
-                                    skipped_ref[0] += 1
-                                    self._append_log(
-                                        f"  — {fi.filename[:60]}"
-                                        "  [filtro ext]"
-                                    )
-                                    continue
-
-                                # Dedup de URL (misma URL en múltiples posts)
-                                if fi.url in seen_urls:
-                                    skipped_ref[0] += 1
-                                    self._append_log(
-                                        f"  — {fi.filename[:60]}"
-                                        "  [URL duplicada en API]"
-                                    )
-                                    continue
-
-                                seen_urls.add(fi.url)
-                                # Timeout de 120s en el put: si la cola lleva
-                                # demasiado tiempo llena es señal de que los
-                                # workers están colgados (deadlock). Levantar
-                                # TimeoutError rompe el ciclo y termina la sesión
-                                # con un mensaje claro en lugar de congelarse.
-                                await asyncio.wait_for(
-                                    file_queue.put(fi), timeout=120.0
-                                )
-                        finally:
-                            # Señalizar fin a cada worker.
-                            # Si el productor es cerrado por GC o por un
-                            # event loop distinto (qasync reiniciado tras
-                            # cancelación), el await puede fallar con
-                            # RuntimeError → salir silenciosamente; los
-                            # workers ya están cancelados por asyncio.gather.
-                            for _ in range(workers):
-                                try:
-                                    await file_queue.put(None)
-                                except RuntimeError:
-                                    break
-
-                    # ── Workers ────────────────────────────────────────────
-                    # Set compartido entre todos los workers para evitar que
-                    # dos workers descarguen simultáneamente archivos con el
-                    # mismo hash (mismo contenido, distinta URL).
-                    #
-                    # La verificación es atómica en asyncio: entre el
-                    # `await file_queue.get()` y el `.add()` no hay ningún
-                    # punto de yield, por lo que ningún otro worker puede
-                    # correr entre esas dos líneas.
-                    in_progress_hashes: set[str] = set()
-
-                    async def worker_task(slot_id: int) -> None:
-                        while True:
-                            fi = await file_queue.get()
-                            if fi is None:
-                                self._worker_idle(slot_id)
-                                break
-
-                            # ── Dedup entre workers (atómico) ──────────────
-                            # Si otro worker ya está procesando el mismo hash
-                            # (contenido idéntico, URL diferente) → saltar.
-                            if fi.remote_hash and fi.remote_hash in in_progress_hashes:
-                                skipped_ref[0] += 1
-                                self._append_log(
-                                    f"  — {fi.filename[:60]}"
-                                    "  [hash en progreso]"
-                                )
-                                self._update_counters(
-                                    downloaded_ref[0], skipped_ref[0],
-                                    errors_ref[0], deferred_count_ref[0],
-                                )
-                                continue
-
-                            # Registrar hash como en progreso (sin await entre
-                            # el get() anterior y este add → operación atómica)
-                            if fi.remote_hash:
-                                in_progress_hashes.add(fi.remote_hash)
-
-                            try:
-                                # ── Verificaciones de catálogo ─────────────
-                                if await url_exists(folder, fi.url):
-                                    skipped_ref[0] += 1
-                                    self._append_log(
-                                        f"  — {fi.filename[:60]}"
-                                        "  [URL en catálogo]"
-                                    )
-                                    self._update_counters(
-                                        downloaded_ref[0], skipped_ref[0],
-                                        errors_ref[0], deferred_count_ref[0],
-                                    )
-                                    continue
-
-                                if fi.remote_hash and await hash_exists(
-                                    folder, fi.remote_hash
-                                ):
-                                    skipped_ref[0] += 1
-                                    self._append_log(
-                                        f"  — {fi.filename[:60]}"
-                                        "  [hash en catálogo]"
-                                    )
-                                    self._update_counters(
-                                        downloaded_ref[0], skipped_ref[0],
-                                        errors_ref[0], deferred_count_ref[0],
-                                    )
-                                    continue
-
-                                # ── Descarga ───────────────────────────────
-                                counter = await next_counter(folder)
-                                final_name = build_filename(
-                                    artist_info.name, counter, fi.filename
-                                )
-                                self._worker_start(slot_id, fi.filename)
-
-                                def make_cb(
-                                    s: int,
-                                ) -> Callable[[int, int], None]:
-                                    # Throttle: actualizar la UI a 4 Hz máximo.
-                                    # Cada chunk es ~65 KB; a 10 MB/s eso son
-                                    # ~160 llamadas/s por worker → bloquea el
-                                    # event loop de qasync con operaciones Qt.
-                                    # Con el throttle solo se actualizan los
-                                    # widgets cada 250 ms independientemente de
-                                    # la velocidad de descarga.
-                                    _last: list[float] = [0.0]
-
-                                    def cb(done: int, total: int) -> None:
-                                        now = time.monotonic()
-                                        if now - _last[0] < 0.25:
-                                            return
-                                        _last[0] = now
-                                        self._worker_progress(s, done, total)
-                                    return cb
-
-                                # Timeout total por archivo: aunque el servidor
-                                # mande bytes esporádicos (reseteando el stall
-                                # por chunk), un archivo no puede tardar más de
-                                # 10 minutos en total antes de ser diferido.
-                                try:
-                                    result = await asyncio.wait_for(
-                                        engine.download(
-                                            url=fi.url,
-                                            dest_dir=folder,
-                                            filename=final_name,
-                                            on_progress=make_cb(slot_id),
-                                        ),
-                                        timeout=600.0,  # 10 min máx por archivo
-                                    )
-                                except asyncio.TimeoutError:
-                                    self._worker_done(slot_id, fi.filename, "⏸")
-                                    self._append_log(
-                                        f"  ⏸ {fi.filename[:55]}"
-                                        "  [timeout total — diferido]"
-                                    )
-                                    deferred.append((fi, artist_info, folder))
-                                    deferred_count_ref[0] += 1
-                                    self._update_counters(
-                                        downloaded_ref[0], skipped_ref[0],
-                                        errors_ref[0], deferred_count_ref[0],
-                                    )
-                                    continue
-
-                                if not result.ok:
-                                    if result.error_kind in ErrorKind.DEFERRABLE:
-                                        deferred.append(
-                                            (fi, artist_info, folder)
-                                        )
-                                        self._worker_done(
-                                            slot_id, fi.filename, "⏸"
-                                        )
-                                        self._append_log(
-                                            f"  ⏸ {fi.filename[:55]}"
-                                            f"  [{result.error_kind}]"
-                                        )
-                                    else:
-                                        errors_ref[0] += 1
-                                        self._worker_done(
-                                            slot_id, fi.filename, "✗"
-                                        )
-                                        self._append_log(
-                                            f"  ✗ {fi.filename[:45]}"
-                                            f":  {result.error}"
-                                        )
-                                    self._update_counters(
-                                        downloaded_ref[0], skipped_ref[0],
-                                        errors_ref[0], deferred_count_ref[0],
-                                    )
-                                    continue
-
-                                if result.file_hash is None:
-                                    # No debería ocurrir: engine garantiza hash
-                                    # en descargas exitosas. Si pasa, es un bug.
-                                    errors_ref[0] += 1
-                                    self._append_log(
-                                        f"  ✗ {fi.filename[:50]}"
-                                        ":  bug interno — hash nulo tras descarga"
-                                    )
-                                    if result.dest and result.dest.exists():
-                                        result.dest.unlink()
-                                    continue
-
-                                # ── Catalogar resultado ────────────────────
-                                if result.file_hash in local_hashes:
-                                    # Existe en disco con otro nombre → renombrar.
-                                    # new_path == result.dest (ambos = folder/final_name).
-                                    old_path = local_hashes[result.file_hash]
-                                    new_path = folder / final_name
-                                    try:
-                                        old_path.rename(new_path)
-                                        local_hashes[result.file_hash] = new_path
-                                        # Rename OK: result.dest es copia redundante
-                                        if result.dest and result.dest.exists():
-                                            result.dest.unlink()
-                                        renamed = True
-                                    except OSError:
-                                        # Rename falló (ej: destino ya existe = result.dest).
-                                        # result.dest ya está en la ubicación correcta;
-                                        # old_path es el duplicado → intentar borrarlo.
-                                        try:
-                                            old_path.unlink()
-                                        except OSError:
-                                            pass
-                                        local_hashes[result.file_hash] = result.dest
-                                        renamed = False
-                                    await add_file(
-                                        artist_dir=folder,
-                                        file_hash=result.file_hash,
-                                        filename=final_name,
-                                        url_source=fi.url,
-                                        file_size=result.file_size,
-                                        counter=counter,
-                                    )
-                                    downloaded_ref[0] += 1
-                                    if renamed:
-                                        self._worker_done(slot_id, final_name, "↷")
-                                        self._append_log(
-                                            f"  ↷ {old_path.name}"
-                                            f"  →  {final_name}"
-                                            "  [renombrado]"
-                                        )
-                                    else:
-                                        self._worker_done(slot_id, final_name, "✓")
-                                        self._append_log(
-                                            f"  ✓ {fi.filename[:40]}"
-                                            f"  →  {final_name}"
-                                        )
-
-                                else:
-                                    # Archivo nuevo
-                                    await add_file(
-                                        artist_dir=folder,
-                                        file_hash=result.file_hash,
-                                        filename=final_name,
-                                        url_source=fi.url,
-                                        file_size=result.file_size,
-                                        counter=counter,
-                                    )
-                                    local_hashes[result.file_hash] = result.dest
-                                    downloaded_ref[0] += 1
-                                    self._worker_done(slot_id, final_name, "✓")
-                                    self._append_log(
-                                        f"  ✓ {fi.filename[:40]}"
-                                        f"  →  {final_name}"
-                                    )
-
-                                self._update_counters(
-                                    downloaded_ref[0], skipped_ref[0],
-                                    errors_ref[0], deferred_count_ref[0],
-                                )
-
-                            except asyncio.CancelledError:
-                                raise  # propagar cancelación normalmente
-                            except Exception as _exc:
-                                # Capturar cualquier excepción inesperada
-                                # (OSError de disco, ProtocolError de red, etc.)
-                                # para que UN archivo que falla no cancele
-                                # los otros workers en ejecución paralela.
-                                errors_ref[0] += 1
-                                import traceback as _tb
-                                _msg = f"{type(_exc).__name__}: {_exc}"
-                                self._worker_done(slot_id, fi.filename, "✗")
-                                self._append_log(
-                                    f"  ✗ {fi.filename[:45]}  [excepción] {_msg}"
-                                )
-                                self._append_log(
-                                    "    " + _tb.format_exc().splitlines()[-1]
-                                )
-                                self._update_counters(
-                                    downloaded_ref[0], skipped_ref[0],
-                                    errors_ref[0], deferred_count_ref[0],
-                                )
-                            finally:
-                                # Liberar hash para que otros workers puedan
-                                # procesar contenido idéntico si fuera necesario
-                                if fi.remote_hash:
-                                    in_progress_hashes.discard(fi.remote_hash)
-
-                    # Crear Tasks explícitas para que asyncio pueda
-                    # limpiarlas correctamente aunque el padre sea cancelado.
-                    # Con raw coroutines en gather, si el padre se cancela
-                    # antes de que gather envuelva las coroutines, quedan
-                    # como objetos huérfanos y Python imprime
-                    # "Exception ignored in: <coroutine object>".
-                    _all_tasks = [
-                        asyncio.create_task(producer(), name="producer"),
-                        *[
-                            asyncio.create_task(worker_task(i), name=f"worker-{i}")
-                            for i in range(workers)
-                        ],
-                    ]
-                    try:
-                        # return_exceptions=True: si un worker lanza una
-                        # excepción no capturada, los otros siguen corriendo.
-                        # (Cada worker ya atrapa su propia excepción, pero
-                        # este es un segundo nivel de seguridad.)
-                        await asyncio.gather(*_all_tasks, return_exceptions=True)
-                    except asyncio.CancelledError:
-                        # Cancelar explícitamente y esperar que todas las
-                        # tareas hijas terminen antes de propagar el error.
-                        # Esto evita Tasks huérfanas y los warnings de GC.
-                        for _t in _all_tasks:
-                            _t.cancel()
-                        await asyncio.gather(*_all_tasks, return_exceptions=True)
-                        raise
-
-                    # Actualizar last_synced y file_count de esta fuente
-                    # y refrescar la tabla de fuentes inmediatamente
-                    source_dl = downloaded_ref[0] - dl_before
-                    new_count = (pu["file_count"] or 0) + source_dl
-                    await update_profile_url_sync(
-                        INDEX_DB,
-                        pu["id"],
-                        file_count=new_count,
-                    )
-                    # Refrescar fila en la tabla sin esperar al final
-                    self._refresh_source_row(pu["id"], new_count)
-
-                # ── Cola diferida ──────────────────────────────────────────
-                if deferred:
-                    self._append_log(
-                        f"\n⏭ Cola diferida: {len(deferred)} archivo(s)…"
-                    )
-                    for file_info, a_info, dest_folder in deferred:
-                        if await url_exists(dest_folder, file_info.url):
-                            skipped_ref[0] += 1
-                            continue
-                        counter = await next_counter(dest_folder)
-                        final_name = build_filename(
-                            a_info.name, counter, file_info.filename
-                        )
-                        self._lbl_status.setText(
-                            f"⏭ reintento: {file_info.filename[:55]}"
-                        )
-                        result = await engine.download(
-                            url=file_info.url,
-                            dest_dir=dest_folder,
-                            filename=final_name,
-                        )
-                        if result.ok:
-                            assert result.file_hash is not None
-                            await add_file(
-                                artist_dir=dest_folder,
-                                file_hash=result.file_hash,
-                                filename=final_name,
-                                url_source=file_info.url,
-                                file_size=result.file_size,
-                                counter=counter,
-                            )
-                            downloaded_ref[0] += 1
-                            self._append_log(
-                                f"  ✓ {final_name} (reintento)"
-                            )
-                        else:
-                            deferred_count_ref[0] += 1
-                            self._append_log(
-                                f"  ⏭ {file_info.filename}"
-                                " — pendiente próx. sync"
-                            )
-                        self._update_counters(
-                            downloaded_ref[0],
-                            skipped_ref[0],
-                            errors_ref[0],
-                            deferred_count_ref[0],
-                        )
-
-            # Extraer valores finales para el resumen
-            downloaded = downloaded_ref[0]
-            skipped = skipped_ref[0]
-            errors = errors_ref[0]
-            deferred_count = deferred_count_ref[0]
-
             await update_profile_last_checked(INDEX_DB, self._profile["id"])
-            summary = (
-                f"Completado — ↓ {downloaded} nuevos  skip {skipped}"
-            )
-            if errors:
-                summary += f"  ✗ {errors} errores"
-            if deferred_count:
-                summary += f"  ⏭ {deferred_count} para próxima sync"
-            self._lbl_status.setText(summary)
-            self._append_log(f"\n{summary}")
+            msg = f"Completado \u2014 \u2193 {summary.downloaded} nuevos  skip {summary.skipped}"
+            if summary.errors:
+                msg += f"  \u2717 {summary.errors} errores"
+            if summary.deferred:
+                msg += f"  \u23ed {summary.deferred} para proxima sync"
+            self._lbl_status.setText(msg)
+            self._append_log(f"\n{msg}")
             self._set_status_light("done")
             await self._load_async(self._profile["id"])
-
         except asyncio.CancelledError:
-            self._lbl_status.setText(
-                f"Cancelado — ↓ {downloaded_ref[0]} descargados"
-            )
+            self._lbl_status.setText("Cancelado por el usuario.")
             self._append_log("Descarga cancelada por el usuario.")
             self._set_status_light("cancelled")
         except Exception as exc:
             self._lbl_status.setText(f"Error: {exc}")
-            self._append_log(f"\n✗ Error: {exc}")
+            self._append_log(f"\n\u2717 Error: {exc}")
             self._set_status_light("error")
         finally:
             self._download_task = None
             self._set_busy(False)
+
+    def _on_service_event(self, ev) -> None:
+        """Traduce un evento del servicio de descarga a la UI.
+
+        El servicio invoca este callback de forma sincrona desde el mismo
+        event loop de qasync, por lo que es seguro tocar widgets aqui.
+        """
+        from ...download_service import (
+            Counters,
+            Log,
+            SourceDone,
+            WorkerDone,
+            WorkerIdle,
+            WorkerProgress,
+            WorkersResolved,
+            WorkerStart,
+        )
+
+        if isinstance(ev, Log):
+            self._append_log(ev.msg)
+        elif isinstance(ev, WorkerProgress):
+            self._worker_progress(ev.slot, ev.done, ev.total)
+        elif isinstance(ev, WorkerStart):
+            self._worker_start(ev.slot, ev.filename)
+        elif isinstance(ev, WorkerDone):
+            self._worker_done(ev.slot, ev.filename, ev.icon)
+        elif isinstance(ev, WorkerIdle):
+            self._worker_idle(ev.slot)
+        elif isinstance(ev, Counters):
+            self._update_counters(ev.downloaded, ev.skipped, ev.errors, ev.deferred)
+        elif isinstance(ev, WorkersResolved):
+            self._init_worker_slots(ev.count)
+        elif isinstance(ev, SourceDone):
+            self._refresh_source_row(ev.url_id, ev.file_count)
+        # SourceStarted / Cooldown / BatchInfo / ScanComplete -> ya cubiertos
+        # por los eventos Log que el servicio emite junto a ellos.
 
     async def _do_deduplicate(self) -> None:
         """
