@@ -100,7 +100,9 @@ def save_config(config: UserConfig) -> None:
 
     lines = [
         "[general]\n",
-        f'download_dir = "{config.download_dir}"\n',
+        # String literal de TOML (comillas simples): no procesa escapes, así las
+        # rutas de Windows (G:\images\…) no rompen el parseo por el backslash.
+        f"download_dir = '{config.download_dir}'\n",
         f"workers = {config.workers}\n",
         f"timeout = {config.timeout}\n",
         "\n[network]\n",

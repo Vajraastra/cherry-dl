@@ -580,6 +580,84 @@ async def _reindex(download_dir: Optional[str], dry_run: bool) -> None:
 
 
 @app.command()
+def recover(
+    download_dir: Optional[str] = typer.Argument(
+        None, help="Carpeta de colecciones (por defecto: download_dir del config)"
+    ),
+    prefer: str = typer.Option(
+        "patreon", "--prefer", help="Servicio preferido al resolver colisiones de nombre"
+    ),
+    apply_review: bool = typer.Option(
+        False, "--apply-review", help="Aplica el archivo recovery_review.txt editado"
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Muestra el plan sin tocar el índice ni las carpetas"
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="No pedir confirmación"),
+):
+    """
+    Reconstruye perfiles de colecciones viejas (sin profile_meta) cruzando el
+    nombre de carpeta con el directorio de creadores de kemono. Útil para
+    recuperar el índice tras cambiar de OS cuando las carpetas se crearon antes
+    de la auto-descripción. Snapshot del directorio en `.recovery/`.
+    """
+    run(_recover(download_dir, prefer, apply_review, dry_run, yes))
+
+
+async def _recover(download_dir, prefer, apply_review_flag, dry_run, yes) -> None:
+    from .config import load_config, ensure_dirs, INDEX_DB
+    from . import recovery
+
+    config = load_config()
+    ensure_dirs(config)
+    base = Path(download_dir) if download_dir else config.download_path
+    if not base.is_dir():
+        console.print(f"[red]No existe la carpeta: {base}[/]")
+        raise typer.Exit(1)
+
+    if apply_review_flag:
+        res = await recovery.apply_review(INDEX_DB, base)
+        console.print(f"[green]✓ Aplicadas {len(res['applied'])} entradas del review.[/]")
+        if res["skipped"]:
+            console.print(f"[yellow]Saltadas (sin URL válida): {len(res['skipped'])}[/]")
+        return
+
+    # Primer pase en dry-run para mostrar el plan
+    plan = await recovery.recover_profiles(INDEX_DB, base, prefer, dry_run=True)
+    console.print(
+        f"Plan de recuperación en [bold]{base}[/]:\n"
+        f"  reconstruibles: [green]{len(plan['recovered'])}[/]  ·  "
+        f"a revisar: [yellow]{len(plan['review'])}[/]  ·  "
+        f"ya auto-describibles: {len(plan['already'])}"
+    )
+    for r in plan["recovered"][:10]:
+        console.print(f"    [green]✓[/] {r['folder']:24s} → {r['url']}")
+    if len(plan["recovered"]) > 10:
+        console.print(f"    … y {len(plan['recovered']) - 10} más")
+    for r in plan["review"]:
+        opts = ", ".join(f"{c['service']}/{c['id']}" for c in r["candidates"]) or "(sin match)"
+        console.print(f"    [yellow]?[/] {r['folder']:24s} → {opts}")
+
+    if dry_run:
+        return
+    if not yes and not typer.confirm("\n¿Aplicar la recuperación?"):
+        console.print("[yellow]Cancelado.[/]")
+        return
+
+    res = await recovery.recover_profiles(INDEX_DB, base, prefer, dry_run=False)
+    console.print(
+        f"\n[green]✓ Recuperados {len(res['recovered'])} perfiles.[/]  "
+        f"A revisar: {len(res['review'])}"
+    )
+    if res["review"]:
+        console.print(
+            "[yellow]Revisá[/] "
+            f"[dim]{base / '.recovery' / 'recovery_review.txt'}[/] "
+            "y luego: [bold]cherry-dl recover --apply-review[/]"
+        )
+
+
+@app.command()
 def migrate_pending(
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Muestra qué catálogos se migrarían sin tocarlos"
