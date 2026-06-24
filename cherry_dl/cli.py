@@ -580,6 +580,42 @@ async def _reindex(download_dir: Optional[str], dry_run: bool) -> None:
 
 
 @app.command()
+def patreon_login(
+    session_id: Optional[str] = typer.Option(
+        None, "--session-id", help="Valor de la cookie 'session_id' de patreon.com"
+    ),
+    device_id: Optional[str] = typer.Option(
+        None, "--device-id", help="(Opcional) cookie 'patreon_device_id'"
+    ),
+):
+    """
+    Guarda manualmente la sesión de Patreon (session_id).
+
+    Necesario en Windows: el cifrado App-Bound de Brave/Chrome impide leer las
+    cookies automáticamente. Obtené el valor en el navegador: F12 → Application
+    → Cookies → https://www.patreon.com → copiá el valor de 'session_id'.
+    """
+    from .auth.patreon import save_patreon_cookies, load_patreon_cookies
+
+    if not session_id:
+        session_id = typer.prompt(
+            "Pegá el valor de la cookie 'session_id' de patreon.com",
+            hide_input=True,
+        )
+    session_id = (session_id or "").strip()
+    if not session_id:
+        console.print("[red]session_id vacío — cancelado.[/]")
+        raise typer.Exit(1)
+
+    cookies = {"session_id": session_id}
+    if device_id:
+        cookies["patreon_device_id"] = device_id.strip()
+    save_patreon_cookies(cookies)
+    console.print("[green]✓ Sesión de Patreon guardada en session.json (TTL 30 días).[/]")
+    console.print("[dim]Probala con: cherry-dl download <url_patreon>[/]")
+
+
+@app.command()
 def recover(
     download_dir: Optional[str] = typer.Argument(
         None, help="Carpeta de colecciones (por defecto: download_dir del config)"
