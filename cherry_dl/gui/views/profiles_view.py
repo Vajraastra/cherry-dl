@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Callable
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFrame,
@@ -186,16 +186,21 @@ class ProfilesView(QWidget):
             await init_index(INDEX_DB)
             rows = await list_profiles(INDEX_DB)
 
-            # Enriquecer con stats de catalog.db (total archivos + tamaño)
-            from ...catalog import get_stats
+            # Enriquecer con stats de catalog.db (total archivos + tamaño) y
+            # con el conteo de pendientes (filtrado por el ext_filter del perfil).
+            from ...catalog import get_stats, pending_count
+            from ...downloads import _decode_profile_filter
             enriched: list[dict] = []
             for row in rows:
                 folder = Path(row["folder_path"])
                 if folder.exists():
                     stats = await get_stats(folder)
+                    _, eff_ext = _decode_profile_filter(row.get("ext_filter", ""))
+                    n_pending = await pending_count(folder, ext_filter=eff_ext or None)
                 else:
                     stats = {"total": 0, "total_size": 0}
-                enriched.append({**row, **stats})
+                    n_pending = None  # carpeta inexistente → estado desconocido
+                enriched.append({**row, **stats, "pending": n_pending})
 
             self._rows = enriched
             self._populate_table(enriched)
@@ -251,14 +256,24 @@ class ProfilesView(QWidget):
                 _right_item(_fmt_size(row.get("total_size", 0))),
             )
 
-            # Estado
+            # Estado — refleja la pending_queue (igual que la TUI):
+            #   ?           carpeta inexistente
+            #   ⏳ N        N archivos en cola (amarillo)
+            #   ✓ fecha     sin pendientes y ya verificado (verde)
+            #   ○ Sin sync  sin pendientes y nunca verificado (gris)
+            pending = row.get("pending")
             last_checked = row.get("last_checked")
-            status_text = (
-                f"✓  {last_checked[:10]}" if last_checked else "Sin verificar"
-            )
-            self._table.setItem(
-                r, _COL_STATUS, QTableWidgetItem(status_text)
-            )
+            if pending is None:
+                status_text, color = "?", "#808080"
+            elif pending > 0:
+                status_text, color = f"⏳ {pending}", "#d8a200"
+            elif last_checked:
+                status_text, color = f"✓  {last_checked[:10]}", "#3a9d3a"
+            else:
+                status_text, color = "○ Sin sync", "#808080"
+            status_item = QTableWidgetItem(status_text)
+            status_item.setForeground(QColor(color))
+            self._table.setItem(r, _COL_STATUS, status_item)
 
         self._table.resizeRowsToContents()
 

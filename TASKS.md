@@ -2,10 +2,10 @@
 
 ## ← RETOMAR AQUÍ (handoff 2026-06-24 — fin sesión 3)
 
-**EMPEZAR POR: Fase 3, Paso 4** — `profiles_view` + columna Estado (pending_count por perfil).
-Pasos 2 y 3 hechos y **validados e2e bajo qasync** (completación + cancelación, ver BITACORA).
-`resolve_auth` aún sin cablear → si falta sesión Patreon, loguea "auth cancelada" (pendiente Paso 5
-wizard/auth). Commits 8ae7e80 (Paso 2) + Paso 3 locales, pendiente push.
+**EMPEZAR POR: Fase 3, Paso 5** — wizard fix (`new_profile_wizard`: estructura de carpetas vieja
+en preview L279, `rename`→`replace`) + cablear `resolve_auth` (modal de auth Patreon; hoy el
+servicio loguea "auth cancelada" si falta sesión). Pasos 2-4 hechos y validados headless.
+Pasos 2-4 commiteados; hasta cc8dc8c pusheado a origin (Paso 4 pendiente push).
 
 Contexto rápido: el servicio de descarga `cherry_dl/download_service.py` ya existe, está
 **validado headless con BadSpider** y es la base de la GUI. La GUI será la UI oficial; la TUI se
@@ -53,7 +53,12 @@ veredicto por archivo en BITACORA. Backend compartido es sólido; la TUI es la s
         fijo en False (UI solo-incluir). `resolve_auth=None` por ahora. Import GUI OK + 18/18 tests.
   - [x] **Prueba e2e Paso 3** (headless qasync, template stub + HTTP local, index/carpeta temp):
         completación 5/5 archivos+catálogo+progreso; cancelación tras 3 → task limpia, sin deadlock.
-  - [ ] Paso 4 — `profiles_view` + columna Estado. Paso 5 — wizard fix. Paso 6 — batch_view.
+  - [x] **Paso 4** — `profiles_view` columna Estado refleja la pending_queue como la TUI:
+        `⏳ N` (amarillo) / `✓ fecha` (verde) / `○ Sin sync` (gris) / `?` (carpeta inexistente).
+        Conteo filtrado por el ext_filter del perfil. `_encode/_decode_profile_filter` movidos de
+        `tui/app.py` a `downloads.py` (TUI reimporta). Test headless: 5/5 estados OK, incluido el
+        filtrado (⏳1 de 3 con filtro zip). 18/18 tests; import TUI+GUI OK.
+  - [ ] Paso 5 — wizard fix + resolve_auth. Paso 6 — batch_view.
         Paso 7 — duplicates_view. Paso 8 — lanzador GUI por defecto + deprecación TUI.
 - [ ] Bugs del legacy a corregir en el port: estructura de carpetas vieja en wizard (preview L279);
       `rename`→`replace`; portar EXT_GROUPS/pending_queue/incremental a la GUI.

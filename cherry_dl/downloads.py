@@ -61,6 +61,42 @@ EXT_GROUPS: dict[str, tuple[str, set[str]]] = {
 }
 
 
+def _encode_profile_filter(group_ids: list[str], custom: str) -> str:
+    """Serializa selección de filtro de perfil a JSON para guardar en BD."""
+    import json
+    return json.dumps({"groups": group_ids, "custom": custom.strip()})
+
+
+def _decode_profile_filter(stored: str) -> tuple[set[str], set[str]]:
+    """
+    Deserializa un ext_filter guardado.
+    Retorna (group_ids_set, ext_filter_set).
+    - Si stored empieza con '{' → formato JSON nuevo.
+    - Si no → formato legacy (extensiones separadas por coma).
+    """
+    import json
+
+    if not stored:
+        return set(), set()
+
+    if stored.startswith("{"):
+        try:
+            data      = json.loads(stored)
+            group_ids = set(data.get("groups", []))
+            ext_set: set[str] = set()
+            for gid in group_ids:
+                if gid in EXT_GROUPS:
+                    _, exts = EXT_GROUPS[gid]
+                    ext_set.update("." + e for e in exts)
+            ext_set.update(_parse_ext_filter(data.get("custom", "")))
+            return group_ids, ext_set
+        except Exception:
+            pass
+
+    # Legacy: extensiones separadas por coma
+    return set(), _parse_ext_filter(stored)
+
+
 def _parse_ext_filter(raw: str | None) -> set[str]:
     """
     Convierte una cadena como '.zip, .rar, jpg' en un set normalizado:

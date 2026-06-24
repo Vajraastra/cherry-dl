@@ -23,6 +23,17 @@ ahora llama a `run_profile_download(...)` y traduce los eventos tipados a widget
 - `exclude_mode=False` (la UI de filtro de la GUI es solo-incluir). `resolve_auth=None` por ahora
   → si falta sesión Patreon, el servicio loguea "auth cancelada" y salta la fuente (pendiente Paso 5).
 
+### Paso 4 — profiles_view: columna Estado sobre la pending_queue
+La columna Estado de la GUI sólo mostraba `✓ fecha` / "Sin verificar". Ahora replica la semántica
+de la TUI, basada en `pending_count` (filtrado por el ext_filter del perfil vía `_decode_profile_filter`):
+`⏳ N` (amarillo) si hay pendientes / `✓ fecha` (verde) si verificado y sin cola / `○ Sin sync` (gris)
+si nunca verificado / `?` si la carpeta no existe. Color por `QTableWidgetItem.setForeground(QColor)`.
+- **`_encode_profile_filter` / `_decode_profile_filter` movidos** de `tui/app.py` a `downloads.py`
+  (mismo patrón que EXT_GROUPS en Paso 2): la GUI no debe depender de la TUI (Textual + a deprecar).
+  La TUI los reimporta. Son funciones puras (JSON + backward-compat con formato coma legado).
+- Prueba headless (offscreen + qasync, catálogos reales con pendientes + filas sintéticas): los 5
+  estados renderizan bien, incluido el conteo filtrado (perfil con filtro `zip` → ⏳1 de 3 pendientes).
+
 ### Prueba e2e (headless, bajo qasync real) — TODO VERDE
 Riesgo del Paso 3: que el servicio async corra bien bajo el loop fusionado Qt+asyncio de qasync y
 que `emit` (callback síncrono que toca widgets) funcione. El scan real de Patreon es 2-fases

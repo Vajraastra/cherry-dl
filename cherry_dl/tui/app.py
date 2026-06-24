@@ -43,7 +43,7 @@ from ..catalog import (
     pending_count, pending_url_exists, remove_pending, set_meta_int, url_exists,
 )
 from ..config import INDEX_DB, load_config, save_config
-from ..downloads import EXT_GROUPS
+from ..downloads import EXT_GROUPS, _decode_profile_filter, _encode_profile_filter
 from ..util import safe_dirname
 from ..index import (
     add_exclusion,
@@ -63,45 +63,9 @@ from ..index import (
 )
 
 
-# ── Grupos de extensiones para filtro de batch ─────────────────────────────
-# EXT_GROUPS vive en cherry_dl.downloads (compartido servicio/GUI); se importa arriba.
-
-
-def _encode_profile_filter(group_ids: list[str], custom: str) -> str:
-    """Serializa selección de filtro de perfil a JSON para guardar en BD."""
-    import json
-    return json.dumps({"groups": group_ids, "custom": custom.strip()})
-
-
-def _decode_profile_filter(stored: str) -> tuple[set[str], set[str]]:
-    """
-    Deserializa un ext_filter guardado.
-    Retorna (group_ids_set, ext_filter_set).
-    - Si stored empieza con '{' → formato JSON nuevo.
-    - Si no → formato legacy (extensiones separadas por coma).
-    """
-    import json
-    from ..downloads import _parse_ext_filter
-
-    if not stored:
-        return set(), set()
-
-    if stored.startswith("{"):
-        try:
-            data      = json.loads(stored)
-            group_ids = set(data.get("groups", []))
-            ext_set: set[str] = set()
-            for gid in group_ids:
-                if gid in EXT_GROUPS:
-                    _, exts = EXT_GROUPS[gid]
-                    ext_set.update("." + e for e in exts)
-            ext_set.update(_parse_ext_filter(data.get("custom", "")))
-            return group_ids, ext_set
-        except Exception:
-            pass
-
-    # Legacy: extensiones separadas por coma
-    return set(), _parse_ext_filter(stored)
+# ── Grupos de extensiones / filtros de perfil ──────────────────────────────
+# EXT_GROUPS y _encode/_decode_profile_filter viven en cherry_dl.downloads
+# (compartido servicio/TUI/GUI); se importan arriba.
 
 
 # ── Portapapeles del sistema ────────────────────────────────────────────────
