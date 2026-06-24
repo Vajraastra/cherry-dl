@@ -6,6 +6,49 @@
 
 ---
 
+## 2026-06-23 (sesión 2) — Recuperación de biblioteca + auth Patreon (login guiado)
+
+### Estado: PAUSADO en punto seguro. ← LEER PARA RETOMAR
+
+#### Commiteado + pusheado a origin/main (commits 6d1808e, 5380a6c, 7710a50)
+- **Recuperación del índice** tras la migración: el `index.db` de Windows estaba vacío y
+  el de Bazzite no es accesible (partición ext4). Colecciones en **`G:\images\cherry-dl\`**
+  (55 carpetas). El `catalog.db` NO guarda la URL de scrape (solo archivos) → se reconstruyó
+  cruzando el NOMBRE de carpeta con el directorio de creadores de kemono (`/api/v1/creators`).
+  - **`cherry-dl recover`** (`cherry_dl/recovery.py`): 46/55 perfiles reconstruidos y
+    **validados** contra la API de kemono. 9 sin match → `G:\images\cherry-dl\.recovery\recovery_review.txt`.
+  - Snapshot offline del directorio kemono en `.recovery/` (cierre ~2026-07-04).
+  - Fix Windows: `save_config` rompía con rutas `G:\…` (backslash en TOML) → string literal.
+  - `patreon-login` (versión manual, fallback).
+
+#### Hallazgos clave
+- **kemono cierra ~2026-07-04** → Patreon = fuente primaria; kemono interino.
+- **id de kemono ≠ campaign_id de Patreon** (BadSpider: 7998148 vs 1261877; kemono da el
+  *user id*). Para pre-cargar URLs Patreon usar vanity = nombre kemono (`patreon.com/c/{name}`),
+  que el template resuelve (verificado con BadSpider).
+- **Auth Windows bloqueada**: App-Bound Encryption de Brave/Chrome (~2024) → `browser_cookie3`
+  y `rookiepy` fallan (RequiresAdminError). Logins con Google bloquean navegadores embebidos.
+  **Solución (esquiva ambos): login guiado en el navegador REAL + captura por CDP (nodriver).**
+  PROBADO: capturó session_id, resolvió BadSpider, y test e2e bajó 15 imágenes de BadSpider
+  desde Patreon con filtro solo-imágenes (proyecto de prueba ya borrado; `BadSpider` original intacto).
+
+#### Integración del login guiado — EN CURSO (SIN commitear aún)
+- HECHO: `pyproject.toml` (+`nodriver>=0.50.0`); `cherry_dl/auth/browser_login.py`
+  (`find_browser()` cross-OS + `capture_cookies()` CDP); `cherry_dl/auth/patreon.py`
+  (`guided_login_patreon()`). Imports OK; find_browser detecta Brave.
+- Perfil de navegador persistente en `~/.cherry-dl/browser-profile`.
+
+#### ← EMPEZAR AQUÍ al retomar
+1. **Cablear `cli.py` `patreon-login`**: por defecto login guiado (llamar
+   `guided_login_patreon` + `find_browser`); `--session-id` como fallback manual.
+   `cli.py` está INTACTO en su versión manual (la edición no se aplicó).
+2. **Probar** `cherry-dl patreon-login` guiado y luego sincronizar.
+3. **NO tocar la TUI** (decisión del usuario): tras confirmar compat dual-OS → transición a **PySide6**.
+4. Pendiente aparte: re-sync TOTAL del BadSpider real (mal organizado); 9 folders en review;
+   prueba DuplicateScreen (04-09).
+
+---
+
 ## 2026-06-23 — Compatibilidad Windows 11 + biblioteca portable entre OSes
 
 Migración de Bazzite (Fedora Atomic) a Windows 11. Auditoría de compatibilidad y

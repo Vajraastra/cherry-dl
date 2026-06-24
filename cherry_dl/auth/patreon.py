@@ -108,8 +108,9 @@ async def ensure_patreon_session() -> dict[str, str]:
 
     Pasos:
       1. session.json válido  →  retorna cookies guardadas
-      2. browser_cookie3      →  lee del browser, guarda y retorna
-      3. raise NeedsManualAuth →  la TUI muestra PatreonAuthModal
+      2. browser_cookie3      →  lee del browser (funciona en Linux; en Windows
+                                  el cifrado App-Bound lo bloquea)
+      3. raise NeedsManualAuth →  el llamador dispara guided_login_patreon()
     """
     existing = load_patreon_cookies()
     if existing:
@@ -123,6 +124,29 @@ async def ensure_patreon_session() -> dict[str, str]:
     raise NeedsManualAuth(
         "No se encontró sesión activa de Patreon en el navegador."
     )
+
+
+async def guided_login_patreon(on_status=None) -> dict[str, str] | None:
+    """
+    Login guiado: abre el navegador real del usuario, espera el login y captura
+    la cookie session_id por CDP. Funciona en Windows (esquiva App-Bound) y con
+    logins de Google (navegador real, no detectable como automatización).
+
+    Retorna las cookies guardadas, o None si no se pudo capturar.
+    """
+    from .browser_login import capture_cookies
+
+    cookies = await capture_cookies(
+        login_url="https://www.patreon.com/login",
+        domain="patreon.com",
+        wanted=set(COOKIES_TO_KEEP),
+        require="session_id",
+        on_status=on_status,
+    )
+    if cookies and cookies.get("session_id"):
+        save_patreon_cookies(cookies)
+        return cookies
+    return None
 
 
 # ── Lectura de cookies del browser ────────────────────────────────────────────

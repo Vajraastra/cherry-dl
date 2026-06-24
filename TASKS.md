@@ -1,5 +1,22 @@
 # TASKS — cherry-dl
 
+## ← RETOMAR AQUÍ (handoff 2026-06-23 sesión 2)
+
+**Integración del login guiado de Patreon — EN CURSO.** Detalle completo en BITACORA
+("sesión 2"). Backend HECHO (sin commitear): `auth/browser_login.py`,
+`auth/patreon.py:guided_login_patreon`, `pyproject` (+nodriver). Falta:
+- [ ] **Cablear `cli.py` `patreon-login`** → default = login guiado; `--session-id` = fallback.
+      (`cli.py` intacto en versión manual; la edición no llegó a aplicarse.)
+- [ ] Probar `cherry-dl patreon-login` guiado end-to-end + sincronizar.
+- [ ] **NO tocar TUI**; tras confirmar compat dual-OS → transición a **PySide6**.
+- [ ] Re-sync TOTAL del BadSpider real (mal organizado); 9 folders en `.recovery/recovery_review.txt`.
+
+**Recuperación + auth — listo y pusheado:** `recover` (46/55 perfiles), snapshot kemono
+offline, fix TOML Windows, prototipo login guiado probado (bajó 15 imgs de BadSpider).
+kemono cierra ~2026-07-04 → Patreon primaria. id kemono ≠ campaign_id Patreon.
+
+---
+
 ## Estado actual (2026-06-23)
 
 ### Compatibilidad Windows 11 + biblioteca portable — COMPLETA ✓ (2026-06-23)
