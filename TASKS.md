@@ -1,30 +1,45 @@
 # TASKS — cherry-dl
 
-## ← RETOMAR AQUÍ (handoff 2026-06-24 — fin sesión 3)
+## ← RETOMAR AQUÍ (handoff 2026-06-24 — fin sesión 4)
 
-**EMPEZAR POR: tres refinamientos pedidos por David (prioridad: login) tras probar la GUI:**
-1. **Login Patreon (HECHO, falta prueba en vivo)** — chequeo proactivo: si el perfil baja de
-   Patreon y no hay sesión (`load_patreon_cookies()`), popup en contexto "Iniciar sesión / Cancelar"
-   antes de descargar (no bajar lo público en silencio). `_run_patreon_login` abre el navegador
-   (login guiado) con progreso al log. Cerrar/ver sesión en Ajustes (sección "Cuenta de Patreon").
-   `_resolve_auth` queda como fallback si la sesión expira a mitad. ⚠ El login guiado real (nodriver
-   abre Brave) NO se pudo probar headless — David debe validarlo en vivo. Lógica del gate sí testeada.
-2. **Feedback de escaneo (HECHO)** — nuevo evento `ScanProgress(seen, queued)` emitido cada 25
-   posts en la Fase 1; el dispatcher actualiza la barra de estado inferior ("Escaneando… N vistos ·
-   M en cola"). También se actualiza el estado en `SourceStarted`/`BatchInfo` y se resetea tras el
-   gate de login (ya no queda pegado en "Esperando login…"). Probado: emite en 25/50, ScanComplete OK.
-   ⚠ Falta confirmar en vivo que RuiDX ahora muestra el contador subiendo durante el scan largo.
-3. **Filtro por tipos (PENDIENTE)** — hoy la GUI pide extensiones a mano (tedioso, error fastidia
-   la descarga). Portar los checkboxes de `EXT_GROUPS` (ya en `downloads.py`) a `artist_detail_view`
-   y al wizard, con `_encode/_decode_profile_filter`.
+**ESTADO: David está corriendo un test FULL en vivo (descarga real de RuiDX, ~horas). Al volver,
+primero verificar el resultado de ese test, luego seguir con los pendientes.**
 
-Luego seguir con Fase 3 Paso 6 (`batch_view`). Pasos 2-5 commiteados; hasta cc8dc8c en origin
-(Paso 4, 5 y login pendientes push). Nota: `run.bat`/`run.sh` ya abren la GUI por defecto (era TUI).
+### 1) Verificar el test full de RuiDX (lo PRIMERO al retomar)
+- David lanzó la GUI y descargó RuiDX (perfil #33, fuentes patreon `patreon.com/cw/RuiDX/posts`
+  + kemono migrado id 14225392). Login Patreon **funcionó en vivo** (Brave abrió, sesión capturada
+  y guardada). Estaba en escaneo completo (filtro `jpg,png,mp4` cambió → full scan, miles de posts).
+- Al volver, confirmar: ¿terminó el scan + descarga? ¿bajó contenido **de pago** (sesión activa) y
+  no solo público? Chequeo read-only de RuiDX (scratchpad tiene `diag_ruidx.py` de plantilla):
+  comparar `pending_count`/`get_stats` antes/después y revisar el log de la GUI.
+- Sesión Patreon: **ACTIVA/guardada** tras el login. Backup de la sesión vieja en
+  `…/scratchpad/session.json.bak` (por si hace falta restaurar).
 
-Contexto rápido: el servicio de descarga `cherry_dl/download_service.py` ya existe, está
-**validado headless con BadSpider** y es la base de la GUI. La GUI será la UI oficial; la TUI se
-deprecará. La GUI legada NO es base confiable (revisar antes de reusar). Las sincronizaciones reales
-las hace David a mano (no incluir en pendientes). Detalle completo abajo y en BITACORA (sesión 3).
+### 2) Pendientes de features (en orden)
+- **Filtro por tipos (PENDIENTE)** — hoy la GUI pide extensiones a mano (tedioso; un error fastidia
+  la descarga entera, dijo David). Portar los checkboxes de `EXT_GROUPS` (ya en `downloads.py`) a
+  `artist_detail_view` y al wizard, con `_encode/_decode_profile_filter` (también en `downloads.py`).
+  Reemplazar el `QLineEdit` de filtro por grupos + campo custom; `_do_download` hoy hace
+  `_parse_ext_filter(self._ext_filter.text())` → cambiar a leer los checkboxes.
+- **Fase 3 Paso 6** — `batch_view` (descarga por lotes multi-perfil sobre el servicio).
+- **Paso 7** — `duplicates_view`. **Paso 8** — deprecación formal de la TUI (lanzador ya hecho:
+  `run.sh` abre `gui` por defecto; TUI sólo vía `run.bat tui`).
+
+### Hecho en sesión 4 (todo commiteado; ver "pendiente push" abajo)
+- **Paso 2** `EXT_GROUPS`→`downloads.py` (8ae7e80). **Paso 3** `artist_detail_view` delega en el
+  servicio (6d7c58e) + e2e qasync (cc8dc8c). **Paso 4** columna Estado sobre pending_queue (e3f330d).
+  **Paso 5** estructura de carpetas plana + resolve_auth (2f6910d).
+- **Login Patreon en contexto** (0f4fb4c): popup al descargar de Patreon sin sesión (no baja lo
+  público en silencio); login guiado con progreso; Ajustes→"Cuenta de Patreon" (estado/login/logout).
+  `run.sh` abre la GUI por defecto.
+- **Feedback de escaneo** (0046fbf): evento `ScanProgress` cada 25 posts → barra de estado en vivo.
+
+Contexto: el servicio `cherry_dl/download_service.py` es la base canónica de la GUI; flujo de 2
+fases **secuencial** (escanea TODO antes de descargar → scans grandes tardan minutos/horas). La GUI
+es la UI oficial; la TUI se deprecará. La GUI legada NO es base confiable. Las sincronizaciones
+reales las hace David a mano (no incluir en pendientes). Pruebas headless reutilizables en
+`scratchpad/` (test_gui_e2e, test_estado, test_login_gate, test_scanprogress, diag_ruidx) —
+técnica documentada en la memoria `validar-descargas-sin-esperar-horas`.
 
 ---
 
