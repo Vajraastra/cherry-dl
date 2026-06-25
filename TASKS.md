@@ -2,34 +2,40 @@
 
 ## ← RETOMAR AQUÍ (handoff 2026-06-24 — sesión 6)
 
-**ESTADO: Fase 3 (migración a PySide6) COMPLETA. Paso 8 HECHO ✓. Auditoría final HECHA ✓
-(limpieza + revisión de código + batería de pruebas 24/24). Solo queda backlog opcional.**
+**ESTADO: Fase 3 (migración a PySide6) COMPLETA y pusheada. Paso 8 + auditoría final HECHOS ✓
+(suite 24/24). Próxima sesión: revisar las 2 implementaciones en stand by (abajo).**
 
-### Auditoría final — HECHO ✓ (sesión 6)
-- **Limpieza**: `diag2.py` borrado; specs sueltas → `docs/` (ARTIST_DISCOVERY, PANOPTICON).
-- **Código**: `update_only` (API muerta) eliminado de `download_service`; comentario de
-  `engine.py` corregido. Sin TODO/FIXME/bare-except reales.
-- **Pruebas**: pytest 24/24 (nuevo `tests/test_catalog_flow.py`), compileall OK, 19 imports OK,
-  MainWindow 6 vistas, CLI help+status reales.
-- **Backlog detectado (opcional)**: portar a la GUI los modos `force_full` (Rescan) y
-  `scan_only` que el servicio ya soporta y la TUI expone. Ampliar cobertura de tests
-  (download_service con stub, dedup, index) — hoy solo catalog + ext_groups versionados.
+### 1) Empezar aquí en la próxima sesión — IMPLEMENTACIONES EN STAND BY
+**Fase 3 está cerrada y pusheada. La próxima sesión revisa estas 2 implementaciones que
+quedaron pendientes (no son bugs; son features del servicio que la GUI aún no expone).**
 
-### 1) Empezar aquí en la próxima sesión
-- **Paso 8 — deprecación formal de la TUI — HECHO ✓ (sesión 6).** Alcance decidido con David:
-  TUI sólo se MARCA (no se borra; se conserva como spec de features), y la GUI legada se
-  RETIRA (de facto ya estaba: la migración fue in-place sobre `cherry_dl/gui/`, `bridge.py`/
-  `native_dialog.py` borrados en saneamiento; `cherry-dl gui` ya lanza el QStackedWidget nuevo).
-  Cambios:
-  - `cli.py tui()` → aviso de deprecación rich (ASCII-safe, sin ⚠/… por cp1252 en Windows) +
-    `time.sleep(3)` cancelable con Ctrl-C antes de arrancar. Docstring `[LEGADO]`.
-  - `cli.py gui()` docstring → "interfaz gráfica oficial".
-  - `gui/__init__.py` docstring obsoleto "Dear PyGui" → "PySide6 + qasync".
-  - `README.md`: GUI=default/oficial, TUI=legacy/deprecated (estaba invertido); CLI reference
-    lista ambos comandos con su rol.
-  - `run.sh`: comentario actualizado (deprecación completa, ya no "en curso").
-  - Verificado: aviso imprime + arranca (sleep/run parcheados), GUI y CLI importan OK.
-- Si David quiere seguir puliendo la GUI: ver "backlog post-sesión 5" abajo.
+- **(A) Portar `force_full` (Rescan completo) y `scan_only` (solo escanear) a la GUI.**
+  El servicio ya los soporta: `download_service.run_profile_download(..., force_full=False,
+  scan_only=False)`. La TUI los expone (botón "↺ Rescan" → `_do_download(force_full=True)`;
+  "⟳ Chequear Todo" usa el conteo de pendientes). La GUI NO los pasa.
+  - **`scan_only`**: el botón ya existe — `artist_detail_view.py:218` `_btn_check`
+    ("⟳ Verificar actualizaciones"). Cablearlo a `run_profile_download(..., scan_only=True)`
+    para que puebla `pending_queue` y muestre cuántos hay sin descargar. Hoy `_do_download`
+    (≈L821) llama al servicio SIN ese flag.
+  - **`force_full`**: falta el botón. Añadir uno (p.ej. "↺ Rescan") junto a `_btn_download`
+    (`artist_detail_view.py:219`) que llame `_do_download` con `force_full=True` para ignorar
+    `last_synced` y escanear desde el inicio.
+  - Considerar exponerlos también en `batch_view.py` (scan_only de toda la biblioteca).
+  - Probar headless (offscreen, servicio stubbeado) como en sesiones 4-5.
+
+- **(B) Ampliar cobertura de tests versionados.** Hoy en `tests/` solo hay `test_ext_groups.py`
+  y `test_catalog_flow.py` (backend de catalog). Falta cubrir: `download_service` (con template
+  stub + HTTP local, como los e2e de scratchpad de sesiones previas), `dedup.py`
+  (name_similarity, url_overlap, dup_keep_remove), e `index.py` (merge_profiles, exclusiones).
+  Técnica de prueba sin red en la memoria `validar-descargas-sin-esperar-horas`.
+
+### Hecho en sesión 6 (todo pusheado)
+- **Paso 8 — deprecación de la TUI** (commit 9ac2f2a): TUI sólo MARCADA (aviso ASCII-safe +
+  sleep cancelable en `cli.py tui()`, docstring `[LEGADO]`); GUI legada ya retirada de facto
+  (migración in-place); README/run.sh/gui `__init__` al día. Detalle en BITACORA sesión 6.
+- **Auditoría final** (commit 1b7edc0): limpieza (diag2 borrado, specs→`docs/`), `update_only`
+  muerto eliminado del servicio, comentario engine corregido, `tests/test_catalog_flow.py`
+  nuevo. Suite 24/24. Detalle en BITACORA sesión 6.
 
 ### 2) Features de GUI completadas (Fase 3) — en orden
 - **Filtro por tipos — HECHO ✓ (sesión 5)** — checkboxes de `EXT_GROUPS` + campo custom en
