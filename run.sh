@@ -100,7 +100,7 @@ echo "[4/4] Lanzando cherry-dl..."
 echo "========================================="
 
 # Sin argumentos → abrir la GUI (UI oficial). Con argumentos → modo CLI.
-# La TUI sigue disponible vía `run.bat tui` mientras se completa la deprecación.
+# La TUI está deprecada (legado); sigue disponible vía `run.bat tui`.
 if [ $# -eq 0 ]; then
     "$UV" run --python "$PYTHON_VERSION" python -m cherry_dl gui
 else

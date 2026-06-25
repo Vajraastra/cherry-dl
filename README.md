@@ -6,11 +6,11 @@ Mass downloader for content platforms — Kemono, Patreon, and Pixiv. Manages pr
 
 ## Interfaces
 
-**TUI** (default) — terminal UI built with Textual. Full profile management, per-artist download control, batch mode, and duplicate detection — all from the terminal.
+**GUI** (default) — PySide6 desktop interface. Full profile management, per-artist download control, batch mode, and duplicate detection. This is the official, actively maintained interface.
 
 **CLI** — scriptable commands for automation and headless use.
 
-**GUI** (legacy) — PySide6 desktop interface, still functional but superseded by the TUI.
+**TUI** (legacy) — terminal UI built with Textual. Still functional and kept as a feature reference, but deprecated in favor of the GUI.
 
 ---
 
@@ -48,7 +48,7 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Or use the included `run.sh` (creates venv, installs deps, launches TUI):
+Or use the included `run.sh` (creates venv, installs deps, launches the GUI):
 
 ```bash
 chmod +x run.sh && ./run.sh
@@ -59,7 +59,8 @@ chmod +x run.sh && ./run.sh
 ## CLI reference
 
 ```bash
-cherry-dl tui                            # Launch TUI (default)
+cherry-dl gui                            # Launch GUI (default, official)
+cherry-dl tui                            # Launch TUI (legacy, deprecated)
 cherry-dl download <url>                 # One-off download
 cherry-dl download <url> --workers 5
 cherry-dl status                         # Show all profiles

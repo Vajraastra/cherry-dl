@@ -1,1 +1,1 @@
-"""Interfaz gráfica de cherry-dl — Dear PyGui."""
+"""Interfaz gráfica oficial de cherry-dl — PySide6 + qasync."""

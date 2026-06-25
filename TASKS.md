@@ -1,17 +1,24 @@
 # TASKS — cherry-dl
 
-## ← RETOMAR AQUÍ (handoff 2026-06-24 — fin sesión 5)
+## ← RETOMAR AQUÍ (handoff 2026-06-24 — sesión 6)
 
-**ESTADO: sesión 5 cerrada en punto seguro (cortos de tokens). TODO commiteado y pusheado.
-Test full de RuiDX = ÉXITO confirmado por David (GUI + login Patreon OK, descarga completa).
-Quedan SOLO el Paso 8 (deprecación formal de la TUI) y backlog opcional.**
+**ESTADO: Fase 3 (migración a PySide6) COMPLETA. Paso 8 (deprecación de la TUI) HECHO ✓.
+Falta commitear los cambios del Paso 8. Luego solo queda backlog opcional.**
 
 ### 1) Empezar aquí en la próxima sesión
-- **Paso 8 — deprecación formal de la TUI.** El lanzador ya abre la GUI por defecto
-  (`run.sh` → `gui`; TUI sólo vía `run.bat tui`). Falta: aviso de deprecación visible al
-  arrancar la TUI, nota en README/CLI (`cherry-dl tui` marcado como legado), y decidir si se
-  retira `cherry-dl gui` legado (el QStackedWidget nuevo es el oficial). Confirmar con David
-  el alcance (¿borrar la TUI o sólo marcarla?) antes de tocar.
+- **Paso 8 — deprecación formal de la TUI — HECHO ✓ (sesión 6).** Alcance decidido con David:
+  TUI sólo se MARCA (no se borra; se conserva como spec de features), y la GUI legada se
+  RETIRA (de facto ya estaba: la migración fue in-place sobre `cherry_dl/gui/`, `bridge.py`/
+  `native_dialog.py` borrados en saneamiento; `cherry-dl gui` ya lanza el QStackedWidget nuevo).
+  Cambios:
+  - `cli.py tui()` → aviso de deprecación rich (ASCII-safe, sin ⚠/… por cp1252 en Windows) +
+    `time.sleep(3)` cancelable con Ctrl-C antes de arrancar. Docstring `[LEGADO]`.
+  - `cli.py gui()` docstring → "interfaz gráfica oficial".
+  - `gui/__init__.py` docstring obsoleto "Dear PyGui" → "PySide6 + qasync".
+  - `README.md`: GUI=default/oficial, TUI=legacy/deprecated (estaba invertido); CLI reference
+    lista ambos comandos con su rol.
+  - `run.sh`: comentario actualizado (deprecación completa, ya no "en curso").
+  - Verificado: aviso imprime + arranca (sleep/run parcheados), GUI y CLI importan OK.
 - Si David quiere seguir puliendo la GUI: ver "backlog post-sesión 5" abajo.
 
 ### 2) Features de GUI completadas (Fase 3) — en orden

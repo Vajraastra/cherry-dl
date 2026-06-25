@@ -958,7 +958,7 @@ def _list_templates() -> str:
 
 @app.command()
 def gui():
-    """Lanza la interfaz gráfica (PySide6)."""
+    """Lanza la interfaz gráfica oficial (PySide6)."""
     try:
         from .gui.app import run_app
     except ImportError:
@@ -970,7 +970,19 @@ def gui():
 
 @app.command()
 def tui():
-    """Lanza la interfaz de texto (Textual TUI)."""
+    """[LEGADO] Lanza la interfaz de texto (Textual TUI). Usa 'gui' (oficial)."""
+    import time
+
+    console.print()
+    console.print("[yellow][!] La TUI Textual esta DEPRECADA.[/yellow]")
+    console.print("  La interfaz oficial es la GUI: [bold]cherry-dl gui[/bold]")
+    console.print("  Esta TUI se mantiene solo como referencia.")
+    console.print("[dim]  Continuando en 3s...  (Ctrl-C para cancelar)[/dim]")
+    try:
+        time.sleep(3)
+    except KeyboardInterrupt:
+        raise typer.Exit(0)
+
     try:
         from .tui.app import run
     except ImportError:

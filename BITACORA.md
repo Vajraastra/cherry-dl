@@ -6,6 +6,36 @@
 
 ---
 
+## 2026-06-24 (sesión 6) — Fase 3 Paso 8: deprecación formal de la TUI
+
+**Fase 3 (migración a PySide6) COMPLETA.** La GUI PySide6 es la interfaz oficial; la TUI
+Textual queda deprecada (se conserva como spec de features, no se borra).
+
+### Alcance decidido con David
+- **TUI → sólo marcar** (no borrar): se mantiene funcional como referencia de features.
+- **GUI legada → retirar**: ya estaba hecho *de facto*. La migración a PySide6 fue **in-place**
+  sobre `cherry_dl/gui/` (no había dos GUIs paralelas); `bridge.py` y `native_dialog.py` se
+  borraron en el saneamiento (commit 12ba7c6) y `cherry-dl gui` ya lanza el `QStackedWidget`
+  nuevo (`gui/app.py`, 6 vistas). Sólo quedaba un docstring obsoleto que mentía ("Dear PyGui").
+
+### Cambios
+- **`cli.py` `tui()`**: aviso de deprecación con `rich` + `time.sleep(3)` cancelable (Ctrl-C →
+  `Exit(0)`) antes de arrancar. Docstring marcado `[LEGADO]`. **Texto ASCII-safe**: se evitan
+  `⚠` (U+26A0) y `…` porque al escribir por una consola Windows en cp1252 lanzan
+  `UnicodeEncodeError` y **crashearían el arranque** — riesgo real en el camino crítico.
+- **`cli.py` `gui()`**: docstring → "interfaz gráfica oficial".
+- **`gui/__init__.py`**: docstring "Dear PyGui" → "PySide6 + qasync".
+- **`README.md`**: estaba invertido (TUI=default, GUI=legacy). Corregido a GUI=default/oficial,
+  TUI=legacy/deprecated; CLI reference lista `gui` (oficial) y `tui` (legado).
+- **`run.sh`**: comentario actualizado (deprecación completa, ya no "en curso").
+
+### Verificación
+- Aviso imprime las 4 líneas y luego arranca (probado con `time.sleep`/`tuiapp.run` parcheados).
+- `cherry-dl --help` muestra los docstrings nuevos; `cherry_dl.gui.app:run_app` y `cherry_dl.cli`
+  importan OK.
+
+---
+
 ## 2026-06-24 (sesión 5) — Fase 3 Pasos 6-7 + bug de hash-join
 
 ### Cambios de UI (GUI PySide6)
