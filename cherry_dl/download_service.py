@@ -176,7 +176,6 @@ async def run_profile_download(
     ext_filter: set[str],
     exclude_mode: bool = False,
     force_full: bool = False,
-    update_only: bool = False,
     scan_only: bool = False,
     emit: EmitFn,
     config=None,

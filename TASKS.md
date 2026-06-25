@@ -2,8 +2,18 @@
 
 ## ← RETOMAR AQUÍ (handoff 2026-06-24 — sesión 6)
 
-**ESTADO: Fase 3 (migración a PySide6) COMPLETA. Paso 8 (deprecación de la TUI) HECHO ✓.
-Falta commitear los cambios del Paso 8. Luego solo queda backlog opcional.**
+**ESTADO: Fase 3 (migración a PySide6) COMPLETA. Paso 8 HECHO ✓. Auditoría final HECHA ✓
+(limpieza + revisión de código + batería de pruebas 24/24). Solo queda backlog opcional.**
+
+### Auditoría final — HECHO ✓ (sesión 6)
+- **Limpieza**: `diag2.py` borrado; specs sueltas → `docs/` (ARTIST_DISCOVERY, PANOPTICON).
+- **Código**: `update_only` (API muerta) eliminado de `download_service`; comentario de
+  `engine.py` corregido. Sin TODO/FIXME/bare-except reales.
+- **Pruebas**: pytest 24/24 (nuevo `tests/test_catalog_flow.py`), compileall OK, 19 imports OK,
+  MainWindow 6 vistas, CLI help+status reales.
+- **Backlog detectado (opcional)**: portar a la GUI los modos `force_full` (Rescan) y
+  `scan_only` que el servicio ya soporta y la TUI expone. Ampliar cobertura de tests
+  (download_service con stub, dedup, index) — hoy solo catalog + ext_groups versionados.
 
 ### 1) Empezar aquí en la próxima sesión
 - **Paso 8 — deprecación formal de la TUI — HECHO ✓ (sesión 6).** Alcance decidido con David:

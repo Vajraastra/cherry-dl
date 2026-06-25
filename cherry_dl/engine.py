@@ -408,7 +408,7 @@ class DownloadEngine:
         error_count: int = 0            # solo errores reales (no range resumes)
 
         # Tiempo de inicio para timeout total del engine.
-        # asyncio.get_event_loop().time() usa el reloj monotónico del loop.
+        # get_running_loop().time() usa el reloj monotónico del loop.
         _t_start = asyncio.get_running_loop().time() if total_timeout else 0.0
 
         while True:

@@ -6,6 +6,44 @@
 
 ---
 
+## 2026-06-24 (sesión 6) — Auditoría final: limpieza + revisión + pruebas
+
+Auditoría de cierre de la Fase 3 en tres fases.
+
+### 1) Limpieza
+- **`diag2.py` borrado**: script de diagnóstico ad-hoc (Range requests al CDN de kemono, 3
+  meses); su hallazgo ya estaba registrado en este BITACORA. Era ruido en la raíz.
+- **`docs/` creado**: `ARTIST_DISCOVERY_IMPLEMENTATION.md` (spec de feature futura, no
+  implementada) y `PANOPTICON_INTEGRATION.md` (contrato de integración externa read-only)
+  movidos de la raíz a `docs/`. Conservan la info; limpian la raíz.
+- Verificado en uso (NO se tocan): `recovery.py` (cli `recover`), `auth/browser_login.py`
+  (auth Patreon/Pixiv), deps `tenacity` (engine) y `pydantic` (config). Cachés ya ignoradas.
+
+### 2) Revisión de código
+- **`download_service.run_profile_download`: parámetro `update_only` ELIMINADO** — estaba
+  declarado en la firma pero nunca se usaba en el cuerpo, y ninguna vista lo pasaba. Su
+  semántica (usar `last_synced` como frontera) ya es el comportamiento por defecto del
+  servicio (sólo `force_full` la anula). Era API muerta. (El `update_only` de la TUI es de
+  su propio `_do_download`, no del servicio — intacto.)
+- **`engine.py`**: comentario desactualizado `get_event_loop()` → `get_running_loop()` (el
+  código ya usaba el correcto desde el saneamiento; sólo mentía el comentario).
+- Sin `bare except`, sin `# type: ignore`, sin `TODO/FIXME` reales. Los `except: pass` son
+  cleanups best-effort o están en la TUI (deprecada).
+- **Zona de mejora anotada (backlog, NO bug)**: la GUI no cablea `force_full` (Rescan completo)
+  ni `scan_only` que el servicio sí soporta y la TUI expone. Decisión de David si se portan.
+
+### 3) Batería de pruebas — TODO VERDE
+- `pytest`: **24/24** (18 de `test_ext_groups` + 6 nuevos de `test_catalog_flow`).
+- **`tests/test_catalog_flow.py` NUEVO**: cubre el backend crítico sin red (catalog.db temp):
+  `next_counter` monotónico, `add_file`+dedup por url/hash, `pending_count` con filtro de ext,
+  `add_pending` idempotente, `remove_pending`, `clean_pending_catalog_overlap`, meta int
+  round-trip. Formato síncrono (`asyncio.run`) — sin depender de pytest-asyncio.
+- `compileall` de `cherry_dl/`: OK. Smoke import de 19 módulos (incl. GUI offscreen + TUI): OK.
+- `MainWindow` construye headless con sus 6 vistas. CLI `--help` (14 comandos) y `status`
+  (lee índice real: 8.402 archivos, 14.4 GB) OK. Aviso de deprecación de la TUI imprime + arranca.
+
+---
+
 ## 2026-06-24 (sesión 6) — Fase 3 Paso 8: deprecación formal de la TUI
 
 **Fase 3 (migración a PySide6) COMPLETA.** La GUI PySide6 es la interfaz oficial; la TUI
