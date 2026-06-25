@@ -17,6 +17,7 @@ from typing import Callable
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
+    QCheckBox,
     QFileDialog,
     QFormLayout,
     QFrame,
@@ -32,7 +33,9 @@ from PySide6.QtWidgets import (
 )
 
 from ...config import INDEX_DB, load_config
+from ...downloads import EXT_GROUPS, _encode_profile_filter
 from ...engine import DownloadEngine
+from ...index import update_profile_ext_filter
 from ...profiles import (
     _safe_dirname,
     _site_from_url,
@@ -137,11 +140,26 @@ class NewProfileWizard(QWidget):
         self._workers_spin.setValue(load_config().workers)
         opts_form.addRow("Workers paralelos:", self._workers_spin)
 
-        self._ext_filter = QLineEdit()
-        self._ext_filter.setPlaceholderText("jpg,png,mp4  (vacío = todos)")
-        opts_form.addRow("Filtro de extensiones:", self._ext_filter)
-
         root.addLayout(opts_form)
+
+        # Filtro de tipos a descargar (checkboxes por grupo + custom)
+        lbl_types = QLabel("Tipos a descargar (vacío = todos):")
+        lbl_types.setObjectName("lbl_status")
+        root.addWidget(lbl_types)
+        types_row = QHBoxLayout()
+        types_row.setSpacing(10)
+        self._ext_checks: dict[str, QCheckBox] = {}
+        for group_id, (label, _exts) in EXT_GROUPS.items():
+            chk = QCheckBox(label)
+            self._ext_checks[group_id] = chk
+            types_row.addWidget(chk)
+        types_row.addWidget(QLabel("Extra:"))
+        self._ext_custom = QLineEdit()
+        self._ext_custom.setPlaceholderText("psd,clip")
+        self._ext_custom.setMaximumWidth(160)
+        types_row.addWidget(self._ext_custom)
+        types_row.addStretch()
+        root.addLayout(types_row)
 
         # ── Archivos preexistentes ──────────────────────────────────────────
         sep2 = QFrame()
@@ -381,6 +399,12 @@ class NewProfileWizard(QWidget):
             )
             for extra_url in self._extra_urls:
                 await add_url_to_profile(INDEX_DB, profile_id, extra_url)
+            groups = [gid for gid, chk in self._ext_checks.items() if chk.isChecked()]
+            if groups or self._ext_custom.text().strip():
+                await update_profile_ext_filter(
+                    INDEX_DB, profile_id,
+                    _encode_profile_filter(groups, self._ext_custom.text()),
+                )
             self._lbl_status.setText(f"Perfil '{name}' creado.")
             if download:
                 self._nav(

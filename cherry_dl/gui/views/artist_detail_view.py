@@ -29,7 +29,6 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPlainTextEdit,
-    QProgressBar,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -42,7 +41,11 @@ from PySide6.QtWidgets import (
 
 from ...catalog import get_stats, hash_exists, init_catalog, url_exists
 from ...config import INDEX_DB, load_config
-from ...downloads import _parse_ext_filter
+from ...downloads import (
+    EXT_GROUPS,
+    _decode_profile_filter,
+    _encode_profile_filter,
+)
 from ...index import (
     add_profile_url,
     get_profile,
@@ -172,18 +175,32 @@ class ArtistDetailView(QWidget):
         self._workers_spin.setFixedWidth(60)
         controls.addWidget(self._workers_spin)
 
-        controls.addWidget(QLabel("Filtro ext:"))
-        self._ext_filter = QLineEdit()
-        self._ext_filter.setPlaceholderText("jpg,png,mp4  (vacío = todos)")
-        self._ext_filter.setMaximumWidth(200)
-        controls.addWidget(self._ext_filter)
-
         controls.addWidget(QLabel("Pre-scan:"))
         self._prescan_input = QLineEdit()
         self._prescan_input.setPlaceholderText("Carpeta con archivos existentes (opcional)")
         controls.addWidget(self._prescan_input)
         controls.addStretch()
         root.addLayout(controls)
+
+        # ── Filtro de tipos a descargar (checkboxes por grupo + custom) ─────
+        filter_row = QHBoxLayout()
+        filter_row.setSpacing(10)
+        lbl_types = QLabel("Tipos:")
+        lbl_types.setObjectName("lbl_subtitle")
+        filter_row.addWidget(lbl_types)
+        self._ext_checks: dict[str, QCheckBox] = {}
+        for group_id, (label, _exts) in EXT_GROUPS.items():
+            chk = QCheckBox(label)
+            chk.toggled.connect(self._on_ext_filter_changed)
+            self._ext_checks[group_id] = chk
+            filter_row.addWidget(chk)
+        filter_row.addWidget(QLabel("Extra:"))
+        self._ext_custom = QLineEdit()
+        self._ext_custom.setPlaceholderText("psd,clip  (vacío = todos)")
+        self._ext_custom.setMaximumWidth(160)
+        filter_row.addWidget(self._ext_custom)
+        filter_row.addStretch()
+        root.addLayout(filter_row)
 
         # ── Acciones ───────────────────────────────────────────────────────
         actions = QHBoxLayout()
@@ -299,7 +316,7 @@ class ArtistDetailView(QWidget):
         self._btn_del_url.clicked.connect(self._on_del_url)
         self._btn_confirm_url.clicked.connect(self._on_confirm_add_url)
         self._btn_cancel_url.clicked.connect(lambda: self._add_url_widget.setVisible(False))
-        self._ext_filter.editingFinished.connect(self._on_ext_filter_changed)
+        self._ext_custom.editingFinished.connect(self._on_ext_filter_changed)
 
     # ── API pública ────────────────────────────────────────────────────────────
 
@@ -385,11 +402,45 @@ class ArtistDetailView(QWidget):
         task = asyncio.ensure_future(self._del_url_async())
         task.add_done_callback(lambda _: self._btn_del_url.setEnabled(True))
 
+    def _load_ext_filter(self, stored: str) -> None:
+        """Refleja el filtro guardado en checkboxes + campo custom (sin disparar guardado)."""
+        import json
+        group_ids: set[str] = set()
+        custom = ""
+        if stored and stored.startswith("{"):
+            try:
+                data = json.loads(stored)
+                group_ids = set(data.get("groups", []))
+                custom = data.get("custom", "")
+            except Exception:
+                pass
+        elif stored:
+            custom = stored  # legacy: extensiones sueltas separadas por coma
+        for gid, chk in self._ext_checks.items():
+            chk.blockSignals(True)
+            chk.setChecked(gid in group_ids)
+            chk.blockSignals(False)
+        self._ext_custom.blockSignals(True)
+        self._ext_custom.setText(custom)
+        self._ext_custom.blockSignals(False)
+
+    def _selected_ext_filter(self) -> set[str]:
+        """Set normalizado de extensiones (con punto) según checkboxes + custom."""
+        _, ext_set = _decode_profile_filter(self._encode_current_filter())
+        return ext_set
+
+    def _encode_current_filter(self) -> str:
+        """Serializa la selección actual de checkboxes + custom a JSON."""
+        groups = [gid for gid, chk in self._ext_checks.items() if chk.isChecked()]
+        return _encode_profile_filter(groups, self._ext_custom.text())
+
     def _on_ext_filter_changed(self) -> None:
         if not self._profile:
             return
         task = asyncio.ensure_future(
-            update_profile_ext_filter(INDEX_DB, self._profile["id"], self._ext_filter.text())
+            update_profile_ext_filter(
+                INDEX_DB, self._profile["id"], self._encode_current_filter()
+            )
         )
         task.add_done_callback(lambda t: t.cancelled() or t.exception())
 
@@ -460,12 +511,10 @@ class ArtistDetailView(QWidget):
             )
             lbl_file.setObjectName("lbl_subtitle")
 
-            bar = QProgressBar()
-            bar.setRange(0, 100)
-            bar.setValue(0)
-            bar.setFixedWidth(160)
-            bar.setFixedHeight(14)
-            bar.setTextVisible(False)
+            lbl_pct = QLabel("")
+            lbl_pct.setFixedWidth(50)
+            lbl_pct.setObjectName("lbl_status")
+            lbl_pct.setAlignment(Qt.AlignmentFlag.AlignRight)
 
             lbl_speed = QLabel("")
             lbl_speed.setFixedWidth(80)
@@ -475,7 +524,7 @@ class ArtistDetailView(QWidget):
             row_layout.addWidget(lbl_id)
             row_layout.addWidget(lbl_status)
             row_layout.addWidget(lbl_file)
-            row_layout.addWidget(bar)
+            row_layout.addWidget(lbl_pct)
             row_layout.addWidget(lbl_speed)
 
             # Insertar antes del stretch para mantener rows al inicio
@@ -484,7 +533,7 @@ class ArtistDetailView(QWidget):
                 "widget": row_widget,
                 "status": lbl_status,
                 "file": lbl_file,
-                "bar": bar,
+                "pct": lbl_pct,
                 "speed": lbl_speed,
                 "start_time": 0.0,
                 "bytes_done": 0,
@@ -506,8 +555,7 @@ class ArtistDetailView(QWidget):
         row["last_ui"] = 0.0
         row["status"].setText("↓")
         row["file"].setText(filename[:55])
-        row["bar"].setRange(0, 100)
-        row["bar"].setValue(0)
+        row["pct"].setText("0%")
         row["speed"].setText("")
 
     def _worker_progress(self, slot: int, done: int, total: int) -> None:
@@ -527,10 +575,9 @@ class ArtistDetailView(QWidget):
             speed = done / elapsed
             row["speed"].setText(_fmt_speed(speed))
         if total > 0:
-            row["bar"].setRange(0, 100)
-            row["bar"].setValue(int(done * 100 / total))
+            row["pct"].setText(f"{int(done * 100 / total)}%")
         else:
-            row["bar"].setRange(0, 0)  # indeterminado
+            row["pct"].setText(_fmt_size(done))  # total desconocido: bytes
 
     def _worker_done(self, slot: int, filename: str, icon: str = "✓") -> None:
         if slot >= len(self._worker_rows):
@@ -538,8 +585,7 @@ class ArtistDetailView(QWidget):
         row = self._worker_rows[slot]
         row["status"].setText(icon)
         row["file"].setText(filename[:55])
-        row["bar"].setRange(0, 100)
-        row["bar"].setValue(100)
+        row["pct"].setText("100%")
         row["speed"].setText("")
 
     def _worker_idle(self, slot: int) -> None:
@@ -548,8 +594,7 @@ class ArtistDetailView(QWidget):
         row = self._worker_rows[slot]
         row["status"].setText("—")
         row["file"].setText("")
-        row["bar"].setRange(0, 100)
-        row["bar"].setValue(0)
+        row["pct"].setText("")
         row["speed"].setText("")
 
     def _update_counters(
@@ -637,7 +682,7 @@ class ArtistDetailView(QWidget):
             # (idle — muestra las filas en estado "—")
             self._init_worker_slots(cfg_workers)
             self._populate_sources(profile["urls"])
-            self._ext_filter.setText(profile.get("ext_filter", ""))
+            self._load_ext_filter(profile.get("ext_filter", ""))
             self._lbl_status.setText("Listo")
 
             if prescan_path:
@@ -780,7 +825,7 @@ class ArtistDetailView(QWidget):
         self._lbl_status.setText("Preparando descarga…")
 
         workers = self._workers_spin.value()
-        ext_filter = _parse_ext_filter(self._ext_filter.text())
+        ext_filter = self._selected_ext_filter()
         # Panel inicial con los workers solicitados; el servicio puede reducir
         # el numero (cap del template) y reemitir via WorkersResolved.
         self._init_worker_slots(workers)

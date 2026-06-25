@@ -16,11 +16,13 @@ primero verificar el resultado de ese test, luego seguir con los pendientes.**
   `…/scratchpad/session.json.bak` (por si hace falta restaurar).
 
 ### 2) Pendientes de features (en orden)
-- **Filtro por tipos (PENDIENTE)** — hoy la GUI pide extensiones a mano (tedioso; un error fastidia
-  la descarga entera, dijo David). Portar los checkboxes de `EXT_GROUPS` (ya en `downloads.py`) a
-  `artist_detail_view` y al wizard, con `_encode/_decode_profile_filter` (también en `downloads.py`).
-  Reemplazar el `QLineEdit` de filtro por grupos + campo custom; `_do_download` hoy hace
-  `_parse_ext_filter(self._ext_filter.text())` → cambiar a leer los checkboxes.
+- **Filtro por tipos — HECHO ✓ (sesión 5)** — checkboxes de `EXT_GROUPS` + campo custom en
+  `artist_detail_view` y en el wizard, con `_encode/_decode_profile_filter`. `_do_download` lee
+  `_selected_ext_filter()` (decode del encoded actual). Carga refleja grupos+custom con compat
+  legacy (`_load_ext_filter`). Wizard ahora SÍ persiste el filtro vía `update_profile_ext_filter`
+  (antes el `QLineEdit` se ignoraba). Probado headless (offscreen): round-trip, set de ext, legacy.
+- **Barras worker → porcentaje numérico — HECHO ✓ (sesión 5)** — descargas muy rápidas hacían las
+  QProgressBar inútiles; reemplazadas por QLabel de `%` (o tamaño en bytes si total desconocido).
 - **Fase 3 Paso 6** — `batch_view` (descarga por lotes multi-perfil sobre el servicio).
 - **Paso 7** — `duplicates_view`. **Paso 8** — deprecación formal de la TUI (lanzador ya hecho:
   `run.sh` abre `gui` por defecto; TUI sólo vía `run.bat tui`).
