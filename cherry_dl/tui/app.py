@@ -44,6 +44,14 @@ from ..catalog import (
 )
 from ..config import INDEX_DB, load_config, save_config
 from ..downloads import EXT_GROUPS, _decode_profile_filter, _encode_profile_filter
+from ..dedup import (
+    compact_folders as _compact_folders,
+    dup_keep_remove as _dup_keep_remove,
+    handle_orphans as _handle_orphans,
+    name_similarity as _name_similarity,
+    normalize_name as _normalize_name,
+    url_overlap as _url_overlap,
+)
 from ..util import safe_dirname
 from ..index import (
     add_exclusion,
@@ -132,38 +140,10 @@ class ClipInput(Input):
         self._insert(_read_clipboard())
 
 
-# ── Helpers de similitud de nombres ─────────────────────────────────────────
-
-def _normalize_name(name: str) -> str:
-    """Normaliza un nombre para comparación: lowercase, solo alfanumérico."""
-    import re
-    return re.sub(r"[^a-z0-9]", "", name.lower())
-
-
-def _name_similarity(a: str, b: str) -> float:
-    """Ratio de similitud (0–1) entre dos nombres, ignorando capitalización y símbolos."""
-    from difflib import SequenceMatcher
-    na, nb = _normalize_name(a), _normalize_name(b)
-    if not na or not nb:
-        return 0.0
-    return SequenceMatcher(None, na, nb).ratio()
-
-
-def _url_overlap(urls_a: list[dict], urls_b: list[dict]) -> str:
-    """
-    Detecta si dos listas de profile_urls comparten el mismo artista
-    en el mismo sitio (site + artist_id coinciden).
-
-    Retorna una descripción del primer match encontrado, o "" si no hay.
-    """
-    for ua in urls_a:
-        if not ua.get("artist_id") or not ua.get("site"):
-            continue
-        for ub in urls_b:
-            if (ub.get("site") == ua["site"]
-                    and ub.get("artist_id") == ua["artist_id"]):
-                return f"{ua['site']}/{ua['artist_id']}"
-    return ""
+# ── Helpers de similitud de nombres / dedup ─────────────────────────────────
+# _normalize_name, _name_similarity, _url_overlap, _dup_keep_remove,
+# _handle_orphans y _compact_folders viven en cherry_dl.dedup (compartido
+# GUI/TUI); se importan arriba.
 
 
 # ── Helpers de formato ──────────────────────────────────────────────────────
@@ -1134,27 +1114,7 @@ class CompactConfirmModal(ModalScreen):
 
 
 # ── DuplicateScreen ──────────────────────────────────────────────────────────
-
-def _dup_keep_remove(pair: dict) -> tuple[int, int, str, str]:
-    """
-    Dado un par, retorna (keep_id, remove_id, keep_name, remove_name).
-    El perfil más antiguo (created_at menor, o id menor) absorbe al más nuevo.
-    """
-    from datetime import datetime
-
-    def _dt(s: str | None) -> datetime:
-        if not s:
-            return datetime.max
-        try:
-            return datetime.fromisoformat(s)
-        except Exception:
-            return datetime.max
-
-    dt_a = _dt(pair.get("created_at_a"))
-    dt_b = _dt(pair.get("created_at_b"))
-    if dt_a <= dt_b:
-        return pair["id_a"], pair["id_b"], pair["name_a"], pair["name_b"]
-    return pair["id_b"], pair["id_a"], pair["name_b"], pair["name_a"]
+# _dup_keep_remove vive en cherry_dl.dedup (importado arriba como alias).
 
 
 class HashScanWarningModal(ModalScreen):
@@ -1765,51 +1725,7 @@ class DuplicateScreen(Screen):
             )
 
 
-def _handle_orphans(
-    folder: Path,
-    orphaned_paths: list[Path],
-    action: str,
-) -> None:
-    """Ejecutado en thread — borra o renombra los archivos/carpeta huérfanos."""
-    import shutil
-
-    if action == "delete":
-        for p in orphaned_paths:
-            try:
-                p.unlink(missing_ok=True)
-            except Exception:
-                pass
-        # Borrar carpeta si quedó vacía (solo tiene catalog.db)
-        try:
-            remaining = [f for f in folder.iterdir()
-                         if f.name != "catalog.db" and not f.name.endswith(".db")]
-            if not remaining:
-                shutil.rmtree(folder, ignore_errors=True)
-        except Exception:
-            pass
-
-    elif action == "rename":
-        new_name = folder.parent / f"orphan_{folder.name}"
-        try:
-            folder.rename(new_name)
-        except Exception:
-            pass  # Si falla (ya existe, permisos), se deja como está
-
-
-async def _compact_folders(folders: list[tuple[int, str]]) -> None:
-    """Compacta la numeración de las carpetas que recibieron archivos migrados."""
-    from ..catalog import apply_compaction, get_numbered_files, plan_compaction
-
-    for _, folder_str in folders:
-        folder = Path(folder_str)
-        try:
-            files = await get_numbered_files(folder)
-            plan  = plan_compaction(files)
-            if plan:
-                new_total = files[-1][0] if files else 0
-                await apply_compaction(folder, plan, new_total)
-        except Exception:
-            pass
+# _handle_orphans y _compact_folders viven en cherry_dl.dedup (alias arriba).
 
 
 class CompactAfterMergeModal(ModalScreen):

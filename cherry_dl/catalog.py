@@ -671,7 +671,24 @@ async def compare_by_hash_join(folder_a: Path, folder_b: Path) -> dict:
     async with aiosqlite.connect(db_a, timeout=30) as db:
         await db.execute("ATTACH DATABASE ? AS cat_b", (str(db_b),))
         try:
-            async with db.execute("SELECT COUNT(*) FROM files") as cur:
+            # Un catalog.db de un perfil sin descargar sólo tiene `profile_meta`
+            # (lo crea write_profile_meta), no `files`. Si falta la tabla en
+            # cualquiera de los dos no puede haber solape de hashes → 0.
+            # Además, SIEMPRE cualificar con main./cat_b.: un `FROM files` sin
+            # prefijo, si `files` no existe en main, cae a la base adjunta y
+            # cuenta los archivos del OTRO catálogo → falso 100%.
+            async with db.execute(
+                "SELECT "
+                "(SELECT COUNT(*) FROM main.sqlite_master "
+                " WHERE type='table' AND name='files'), "
+                "(SELECT COUNT(*) FROM cat_b.sqlite_master "
+                " WHERE type='table' AND name='files')"
+            ) as cur:
+                has_a, has_b = await cur.fetchone()
+            if not has_a or not has_b:
+                return {"total_a": 0, "total_b": 0, "matches": 0, "coverage": 0.0}
+
+            async with db.execute("SELECT COUNT(*) FROM main.files") as cur:
                 total_a = (await cur.fetchone())[0]
             async with db.execute("SELECT COUNT(*) FROM cat_b.files") as cur:
                 total_b = (await cur.fetchone())[0]
@@ -683,7 +700,7 @@ async def compare_by_hash_join(folder_a: Path, folder_b: Path) -> dict:
                 }
 
             async with db.execute(
-                "SELECT COUNT(*) FROM files a "
+                "SELECT COUNT(*) FROM main.files a "
                 "INNER JOIN cat_b.files b ON a.hash = b.hash"
             ) as cur:
                 matches = (await cur.fetchone())[0]

@@ -1,21 +1,20 @@
 # TASKS — cherry-dl
 
-## ← RETOMAR AQUÍ (handoff 2026-06-24 — fin sesión 4)
+## ← RETOMAR AQUÍ (handoff 2026-06-24 — fin sesión 5)
 
-**ESTADO: David está corriendo un test FULL en vivo (descarga real de RuiDX, ~horas). Al volver,
-primero verificar el resultado de ese test, luego seguir con los pendientes.**
+**ESTADO: sesión 5 cerrada en punto seguro (cortos de tokens). TODO commiteado y pusheado.
+Test full de RuiDX = ÉXITO confirmado por David (GUI + login Patreon OK, descarga completa).
+Quedan SOLO el Paso 8 (deprecación formal de la TUI) y backlog opcional.**
 
-### 1) Verificar el test full de RuiDX (lo PRIMERO al retomar)
-- David lanzó la GUI y descargó RuiDX (perfil #33, fuentes patreon `patreon.com/cw/RuiDX/posts`
-  + kemono migrado id 14225392). Login Patreon **funcionó en vivo** (Brave abrió, sesión capturada
-  y guardada). Estaba en escaneo completo (filtro `jpg,png,mp4` cambió → full scan, miles de posts).
-- Al volver, confirmar: ¿terminó el scan + descarga? ¿bajó contenido **de pago** (sesión activa) y
-  no solo público? Chequeo read-only de RuiDX (scratchpad tiene `diag_ruidx.py` de plantilla):
-  comparar `pending_count`/`get_stats` antes/después y revisar el log de la GUI.
-- Sesión Patreon: **ACTIVA/guardada** tras el login. Backup de la sesión vieja en
-  `…/scratchpad/session.json.bak` (por si hace falta restaurar).
+### 1) Empezar aquí en la próxima sesión
+- **Paso 8 — deprecación formal de la TUI.** El lanzador ya abre la GUI por defecto
+  (`run.sh` → `gui`; TUI sólo vía `run.bat tui`). Falta: aviso de deprecación visible al
+  arrancar la TUI, nota en README/CLI (`cherry-dl tui` marcado como legado), y decidir si se
+  retira `cherry-dl gui` legado (el QStackedWidget nuevo es el oficial). Confirmar con David
+  el alcance (¿borrar la TUI o sólo marcarla?) antes de tocar.
+- Si David quiere seguir puliendo la GUI: ver "backlog post-sesión 5" abajo.
 
-### 2) Pendientes de features (en orden)
+### 2) Features de GUI completadas (Fase 3) — en orden
 - **Filtro por tipos — HECHO ✓ (sesión 5)** — checkboxes de `EXT_GROUPS` + campo custom en
   `artist_detail_view` y en el wizard, con `_encode/_decode_profile_filter`. `_do_download` lee
   `_selected_ext_filter()` (decode del encoded actual). Carga refleja grupos+custom con compat
@@ -32,8 +31,26 @@ primero verificar el resultado de ese test, luego seguir con los pendientes.**
   (X/N archivos) + contadores + log. Cableado: botón "⚡ Batch" en `profiles_view`, router
   `app.py` índice 4, nav "batch". Probado headless (offscreen, servicio stubbeado): retry,
   abandono por no-progreso, total correcto, stop limpio. 18/18 tests + MainWindow construye.
-- **Paso 7** — `duplicates_view`. **Paso 8** — deprecación formal de la TUI (lanzador ya hecho:
-  `run.sh` abre `gui` por defecto; TUI sólo vía `run.bat tui`).
+- **Fase 3 Paso 7 — HECHO ✓ (sesión 5)** — `duplicates_view.py`: detección/fusión de perfiles
+  duplicados (port de la `DuplicateScreen` de la TUI sobre PySide6). Fase 1 (auto al mostrar):
+  URL match (site+artist_id) → tabla "Fusión automática"; nombre ≥0.80/≥0.60 → tabla "Revisión
+  manual" (checkboxes). Fase 2 (botón "↺ Comparar por hashes" + confirmación): `compare_by_hash_join`
+  → coverage ≥0.51 promueve a auto, 0.10–0.50 queda en revisión. Ejecutar fusiones:
+  `migrate_unique_files` → modal de huérfanos (borrar/renombrar/ignorar) → `merge_profiles` →
+  ofrece compactar. Botón "✕ Marcar como distintos" (exclusiones). Cableado: botón "⊗ Duplicados"
+  en `profiles_view`, router `app.py` índice 5, nav "duplicates".
+  - **Helpers compartidos → `cherry_dl/dedup.py`** (nuevo módulo): `normalize_name`,
+    `name_similarity`, `url_overlap`, `dup_keep_remove`, `handle_orphans`, `compact_folders`
+    movidos de `tui/app.py`; la TUI los reimporta como alias `_xxx` (patrón EXT_GROUPS).
+  - **BUG DE BACKEND CORREGIDO** (afectaba también a la TUI; su DuplicateScreen nunca se probó
+    e2e — por eso estaba "PENDIENTE PRUEBA"): `compare_by_hash_join` hacía `SELECT … FROM files`
+    SIN cualificar; si el catalog.db de un perfil **sin descargar** sólo tiene `profile_meta`
+    (lo crea `write_profile_meta`) y no la tabla `files`, SQLite caía a la base ATTACHeada `cat_b`
+    y contaba los archivos del OTRO catálogo → **falso 100% de coincidencia**. Fix: cualificar
+    `main.files`/`cat_b.files` + guard de existencia de la tabla `files` en ambos. (catalog.py)
+  - Probado e2e (offscreen, índice+catálogos reales en temp): fase1 (URL+nombre), fase2 (hash
+    60%→auto, y B sin archivos NO da falso 100%→queda en revisión), fusión real + migración de
+    archivos únicos + merge de índice. 18/18 tests + TUI/GUI importan.
 
 ### Hecho en sesión 4 (todo commiteado; ver "pendiente push" abajo)
 - **Paso 2** `EXT_GROUPS`→`downloads.py` (8ae7e80). **Paso 3** `artist_detail_view` delega en el

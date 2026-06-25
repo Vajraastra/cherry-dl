@@ -6,6 +6,39 @@
 
 ---
 
+## 2026-06-24 (sesión 5) — Fase 3 Pasos 6-7 + bug de hash-join
+
+### Cambios de UI (GUI PySide6)
+- **Filtro por tipos** portado a `artist_detail_view` y al wizard (checkboxes `EXT_GROUPS` +
+  custom). El wizard antes IGNORABA su `QLineEdit` de filtro; ahora persiste vía
+  `update_profile_ext_filter`. (commit 875adc2)
+- **Barras de worker → porcentaje numérico** (`QLabel` `%`). Las descargas son tan rápidas que
+  las `QProgressBar` no daban señal útil. (commit 875adc2)
+- **Paso 6 — `batch_view.py`**: descarga por lotes multi-perfil sobre `run_profile_download`;
+  loop que reintenta un perfil sólo si su `pending_queue` baja, abandona si no progresa. (0f700dc)
+- **Paso 7 — `duplicates_view.py`**: port de la `DuplicateScreen` (fase 1 URL/nombre, fase 2
+  hash-join, fusión con gestión de huérfanos + compactación opcional). Helpers puros movidos a
+  `cherry_dl/dedup.py` (la TUI los reimporta como alias).
+
+### BUG raíz — `compare_by_hash_join` falso 100% (catalog.py)
+**Síntoma:** un perfil creado pero **sin descargar** (su `catalog.db` sólo tiene `profile_meta`,
+creado por `write_profile_meta`, sin la tabla `files`) daba **100% de coincidencia de hashes**
+contra cualquier otro perfil al compararse.
+**Causa raíz:** el query usaba `SELECT COUNT(*) FROM files` SIN cualificar. Con la otra base
+ATTACHeada como `cat_b`, si `files` no existe en la base principal, SQLite resuelve el nombre
+en la base adjunta → contaba los archivos del OTRO catálogo como propios → coverage 1.0.
+**Fix:** cualificar `main.files` / `cat_b.files` en todos los `COUNT`/`JOIN` + guard que verifica
+que la tabla `files` existe en AMBAS bases (si falta en alguna → coverage 0).
+**Impacto:** afectaba también a la `DuplicateScreen` de la TUI (que nunca se probó e2e — por eso
+figuraba como "PENDIENTE PRUEBA"). Detectado por el test e2e nuevo de `duplicates_view`.
+
+### Pruebas
+Tests headless reutilizables en scratchpad: `test_batch_view.py` (orquestación del batch con
+servicio stubbeado) y `test_duplicates_view.py` (índice + catálogos reales en temp: fase1, fase2,
+fusión + migración, y el caso del falso 100%). 18/18 tests; TUI+GUI importan.
+
+---
+
 ## 2026-06-24 (sesión 4) — Fase 3 Pasos 2-3: GUI sobre el servicio + prueba e2e qasync
 
 ### Paso 2 — EXT_GROUPS compartido
