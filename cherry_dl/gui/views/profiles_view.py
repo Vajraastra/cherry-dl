@@ -74,6 +74,8 @@ class ProfilesView(QWidget):
         self._search.setMaximumWidth(220)
 
         self._btn_refresh = QPushButton("⟳ Verificar todo")
+        self._btn_batch = QPushButton("⚡ Batch")
+        self._btn_batch.setToolTip("Descarga por lotes — procesa varios perfiles seguidos")
         self._btn_new = QPushButton("+ Nuevo Artista")
         self._btn_new.setObjectName("btn_primary")
         self._btn_settings = QPushButton("⚙")
@@ -84,6 +86,7 @@ class ProfilesView(QWidget):
         header.addStretch()
         header.addWidget(self._search)
         header.addWidget(self._btn_refresh)
+        header.addWidget(self._btn_batch)
         header.addWidget(self._btn_new)
         header.addWidget(self._btn_settings)
         root.addLayout(header)
@@ -145,6 +148,7 @@ class ProfilesView(QWidget):
         self._table.customContextMenuRequested.connect(self._on_context_menu)
         self._btn_new.clicked.connect(self._on_new_artist)
         self._btn_refresh.clicked.connect(self._on_refresh)
+        self._btn_batch.clicked.connect(lambda: self._nav("batch"))
         self._btn_settings.clicked.connect(lambda: self._nav("settings"))
         self._search.textChanged.connect(self._filter_table)
 

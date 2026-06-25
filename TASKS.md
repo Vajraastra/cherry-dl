@@ -23,7 +23,15 @@ primero verificar el resultado de ese test, luego seguir con los pendientes.**
   (antes el `QLineEdit` se ignoraba). Probado headless (offscreen): round-trip, set de ext, legacy.
 - **Barras worker → porcentaje numérico — HECHO ✓ (sesión 5)** — descargas muy rápidas hacían las
   QProgressBar inútiles; reemplazadas por QLabel de `%` (o tamaño en bytes si total desconocido).
-- **Fase 3 Paso 6** — `batch_view` (descarga por lotes multi-perfil sobre el servicio).
+- **Fase 3 Paso 6 — HECHO ✓ (sesión 5)** — `batch_view.py`: descarga por lotes multi-perfil
+  sobre `download_service.run_profile_download`. Lista de perfiles con checkboxes (default todos,
+  muestra ⏳ pendientes) + "Todos/Ninguno"; workers; filtro global por tipos o "usar el filtro de
+  cada perfil". Loop de reintento: re-procesa un perfil sólo si la `pending_queue` BAJÓ (progreso);
+  abandona si quedó igual (sin progreso); tope `_MAX_ITERATIONS=4`. Botones Detener (cancela task
+  actual + corta loop) y Saltar perfil (cancela sólo el actual). Barra de progreso por perfil
+  (X/N archivos) + contadores + log. Cableado: botón "⚡ Batch" en `profiles_view`, router
+  `app.py` índice 4, nav "batch". Probado headless (offscreen, servicio stubbeado): retry,
+  abandono por no-progreso, total correcto, stop limpio. 18/18 tests + MainWindow construye.
 - **Paso 7** — `duplicates_view`. **Paso 8** — deprecación formal de la TUI (lanzador ya hecho:
   `run.sh` abre `gui` por defecto; TUI sólo vía `run.bat tui`).
 

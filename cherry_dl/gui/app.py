@@ -7,7 +7,8 @@ Arquitectura:
          ├─ [0] ProfilesView       ← pantalla principal
          ├─ [1] NewProfileWizard   ← wizard creación
          ├─ [2] ArtistDetailView   ← detalle/descarga
-         └─ [3] SettingsView       ← configuración
+         ├─ [3] SettingsView       ← configuración
+         └─ [4] BatchView          ← descarga por lotes
 
 qasync fusiona el event loop de asyncio con el de Qt, eliminando el
 bridge de queue.Queue + hilo daemon que usaba la GUI anterior (DPG).
@@ -31,12 +32,14 @@ from .views.profiles_view import ProfilesView
 from .views.new_profile_wizard import NewProfileWizard
 from .views.artist_detail_view import ArtistDetailView
 from .views.settings_view import SettingsView
+from .views.batch_view import BatchView
 
 # Índices del QStackedWidget
 _VIEW_PROFILES = 0
 _VIEW_WIZARD = 1
 _VIEW_DETAIL = 2
 _VIEW_SETTINGS = 3
+_VIEW_BATCH = 4
 
 
 class MainWindow(QMainWindow):
@@ -54,11 +57,13 @@ class MainWindow(QMainWindow):
         self._wizard = NewProfileWizard(nav=self.navigate_to)
         self._detail_view = ArtistDetailView(nav=self.navigate_to)
         self._settings_view = SettingsView(nav=self.navigate_to)
+        self._batch_view = BatchView(nav=self.navigate_to)
 
         self._stack.addWidget(self._profiles_view)   # índice 0
         self._stack.addWidget(self._wizard)           # índice 1
         self._stack.addWidget(self._detail_view)      # índice 2
         self._stack.addWidget(self._settings_view)    # índice 3
+        self._stack.addWidget(self._batch_view)       # índice 4
 
         self._stack.setCurrentIndex(_VIEW_PROFILES)
 
@@ -92,6 +97,10 @@ class MainWindow(QMainWindow):
 
             case "settings":
                 self._stack.setCurrentIndex(_VIEW_SETTINGS)
+
+            case "batch":
+                self._batch_view.reset()
+                self._stack.setCurrentIndex(_VIEW_BATCH)
 
             case _:
                 pass
